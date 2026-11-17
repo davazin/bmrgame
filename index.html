@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Protótipo VR – Pegar e soltar na mesa</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; top: 12px; left: 12px; width: 300px; max-width: calc(100vw - 24px);
+    background: rgba(18,20,24,.88); color: #e8e8e8; border: 1px solid #333; border-radius: 12px;
+    padding: 14px 16px; font-size: 13px; line-height: 1.45; box-sizing: border-box;
+  }
+  #ui h1 { font-size: 15px; margin: 0 0 4px; }
+  #ui .muted { color: #9aa0a6; }
+  #count { font-size: 22px; font-weight: 700; margin: 8px 0; }
+  #count.done { color: #5ee08a; }
+  button, label.file {
+    display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 9px 10px;
+    border-radius: 8px; border: 1px solid #444; background: #262a31; color: #fff; font-size: 13px;
+    cursor: pointer; text-align: center;
+  }
+  button:hover, label.file:hover { background: #30353e; }
+  #vrBtn { background: #2f6fed; border-color: #2f6fed; font-weight: 600; }
+  #vrBtn:disabled { background: #333; border-color: #444; color: #999; cursor: default; }
+  label.file input { display: none; }
+  #msg { margin-top: 8px; color: #f0c674; min-height: 1em; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: #9aa0a6; }
+  #toggle { position: absolute; top: 8px; right: 10px; width: auto; margin: 0; padding: 2px 8px; font-size: 12px; }
+  #ui.min > :not(#toggle):not(h1) { display: none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="ui">
+  <button id="toggle">–</button>
+  <h1>Pegar e soltar na mesa</h1>
+  <div class="muted">Protótipo WebXR · Meta Quest 3</div>
+  <div id="count">Itens na mesa: 0 / 0</div>
+  <button id="vrBtn" disabled>Verificando VR…</button>
+  <button id="resetBtn">Reiniciar itens</button>
+  <label class="file">Carregar ambiente (.glb – SketchUp)<input type="file" id="envFile" accept=".glb,.gltf"></label>
+  <label class="file">Adicionar item (.glb – SolidWorks)<input type="file" id="itemFile" accept=".glb,.gltf" multiple></label>
+  <div id="msg"></div>
+  <details>
+    <summary>Controles</summary>
+    <p><b>No Quest:</b> gatilho ou grip pega/solta (com a mão: pinça). Analógico esquerdo anda, direito gira 30°. Botão A/X reinicia.</p>
+    <p><b>No PC:</b> clique e arraste um item para movê-lo; solte para ele cair. A roda do mouse gira o item enquanto arrasta. Arraste o fundo para girar a câmera.</p>
+  </details>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ---------- Configuração ----------
+const ROOM = 8;          // tamanho do piso (m)
+const ROOM_LIMIT = 3.8;  // limite onde itens e jogador podem ir
+const GRAVITY = 9.81;
+
+// ---------- Renderer / cena ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fb4c7);
+
+const rig = new THREE.Group();           // "corpo" do jogador (locomoção move isto)
+scene.add(rig);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.02, 100);
+camera.position.set(-0.2, 1.55, 0.9);
+rig.add(camera);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x6b5a48, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(2, 4, 1.5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -2.5, right: 2.5, top: 2.5, bottom: -2.5, near: 0.5, far: 10 });
+scene.add(sun);
+
+// ---------- Ambiente provisório (substituível pelo .glb do SketchUp) ----------
+let environment = buildPlaceholderRoom();
+scene.add(environment);
+
+function gridTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#b9ad9c'; g.fillRect(0, 0, 256, 256);
+  g.strokeStyle = '#a39683'; g.lineWidth = 4; g.strokeRect(0, 0, 256, 256);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(ROOM, ROOM);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function buildPlaceholderRoom() {
+  const g = new THREE.Group();
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM, ROOM), new THREE.MeshStandardMaterial({ map: gridTexture(), roughness: .9 }));
+  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; g.add(floor);
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0xe9e4da, roughness: 1 });
+  const H = 3, T = 0.1, h = ROOM / 2;
+  [[0, -h, ROOM, T], [0, h, ROOM, T], [-h, 0, T, ROOM], [h, 0, T, ROOM]].forEach(([x, z, w, d]) => {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, H, d), wallMat);
+    wall.position.set(x, H / 2, z); wall.receiveShadow = true; g.add(wall);
+  });
+  return g;
+}
+
+// ---------- Mesa (alvo) e bancada (onde os itens começam) ----------
+const surfaces = []; // superfícies de apoio estáticas
+function makeTable({ x, z, w, d, h, color, isTarget }) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: .7 });
+  const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.04, d), mat);
+  top.position.y = h - 0.02; top.castShadow = top.receiveShadow = true; g.add(top);
+  const legGeo = new THREE.BoxGeometry(0.05, h - 0.04, 0.05);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const leg = new THREE.Mesh(legGeo, mat);
+    leg.position.set(sx * (w / 2 - 0.05), (h - 0.04) / 2, sz * (d / 2 - 0.05));
+    leg.castShadow = true; g.add(leg);
+  }
+  g.position.set(x, 0, z);
+  scene.add(g);
+  const s = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: h, isTarget, group: g };
+  surfaces.push(s);
+  return s;
+}
+const table = makeTable({ x: 0, z: -0.85, w: 1.4, d: 0.8, h: 0.75, color: 0x8a5a3b, isTarget: true });
+makeTable({ x: 0.75, z: 0.05, w: 0.4, d: 0.8, h: 0.85, color: 0x5d6670, isTarget: false });
+
+// Faixa luminosa marcando a área da mesa
+const zone = new THREE.Mesh(
+  new THREE.PlaneGeometry(table.maxX - table.minX - 0.06, table.maxZ - table.minZ - 0.06),
+  new THREE.MeshBasicMaterial({ color: 0x4fd1ff, transparent: true, opacity: 0.18, depthWrite: false })
+);
+zone.rotation.x = -Math.PI / 2;
+zone.position.set((table.minX + table.maxX) / 2, table.top + 0.002, (table.minZ + table.maxZ) / 2);
+scene.add(zone);
+
+// Placar dentro do VR
+const panelCanvas = document.createElement('canvas'); panelCanvas.width = 512; panelCanvas.height = 192;
+const panelTex = new THREE.CanvasTexture(panelCanvas); panelTex.colorSpace = THREE.SRGBColorSpace;
+const panel = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.225), new THREE.MeshBasicMaterial({ map: panelTex, transparent: true }));
+panel.position.set(0, 1.5, -1.35);
+scene.add(panel);
+function drawPanel(n, total) {
+  const g = panelCanvas.getContext('2d');
+  const done = total > 0 && n === total;
+  g.clearRect(0, 0, 512, 192);
+  g.fillStyle = done ? 'rgba(30,120,70,.9)' : 'rgba(20,24,30,.85)';
+  g.beginPath(); g.roundRect(4, 4, 504, 184, 28); g.fill();
+  g.fillStyle = '#fff'; g.textAlign = 'center';
+  g.font = 'bold 64px system-ui, sans-serif';
+  g.fillText(`${n} / ${total}`, 256, 92);
+  g.font = '36px system-ui, sans-serif';
+  g.fillText(done ? 'Tudo na mesa!' : 'itens na mesa', 256, 150);
+  panelTex.needsUpdate = true;
+}
+
+// ---------- Itens ----------
+const items = [];
+const benchSlots = [-0.27, -0.12, 0.03, 0.18, 0.33];
+let nextSlot = 0;
+
+function registerItem(object, name, startPos) {
+  const item = new THREE.Group();
+  item.name = name;
+  item.add(object);
+  object.traverse(o => {
+    if (o.isMesh) {
+      o.castShadow = true; o.receiveShadow = true;
+      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+    }
+  });
+  item.position.copy(startPos);
+  item.userData = { vel: new THREE.Vector3(), resting: false, heldBy: null, home: { p: startPos.clone(), q: item.quaternion.clone() } };
+  scene.add(item);
+  items.push(item);
+  return item;
+}
+function nextBenchPos() {
+  const n = nextSlot++, z = benchSlots[n % benchSlots.length];
+  const x = 0.75 + [0, -0.1, 0.1][Math.floor(n / benchSlots.length) % 3];
+  return new THREE.Vector3(x, 1.0 + 0.15 * Math.floor(n / 15), z);
+}
+
+// Peças provisórias (troque pelos .glb do SolidWorks)
+function mat(color, metal = 0.1) { return new THREE.MeshStandardMaterial({ color, roughness: .5, metalness: metal }); }
+function placeholderItems() {
+  registerItem(new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.11, 0.11), mat(0xe0533d)), 'Caixa', nextBenchPos());
+  registerItem(new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.12, 24), mat(0xc9ced6, .8)), 'Lata', nextBenchPos());
+  registerItem(new THREE.Mesh(new THREE.SphereGeometry(0.05, 24, 16), mat(0x3d9be0)), 'Bola', nextBenchPos());
+  const wrench = new THREE.Group();
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.018, 0.03), mat(0x8f99a3, .9));
+  const head = new THREE.Mesh(new THREE.TorusGeometry(0.03, 0.012, 10, 20, Math.PI * 1.5), mat(0x8f99a3, .9));
+  head.rotation.x = Math.PI / 2; head.position.x = 0.115;
+  wrench.add(handle, head);
+  registerItem(wrench, 'Chave', nextBenchPos());
+  const flange = new THREE.Group();
+  const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.02, 32), mat(0xf2b134, .6));
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.06, 24), mat(0xf2b134, .6));
+  flange.add(disc, hub);
+  registerItem(flange, 'Flange', nextBenchPos());
+}
+placeholderItems();
+
+// ---------- Física simples ----------
+const _box = new THREE.Box3(), _box2 = new THREE.Box3(), _c = new THREE.Vector3();
+
+function supportsFor(item) {
+  const list = [{ minX: -99, maxX: 99, minZ: -99, maxZ: 99, top: 0 }, ...surfaces];
+  for (const other of items) {                        // empilhar sobre outros itens parados
+    if (other === item || !other.userData.resting) continue;
+    _box2.setFromObject(other);
+    list.push({ minX: _box2.min.x, maxX: _box2.max.x, minZ: _box2.min.z, maxZ: _box2.max.z, top: _box2.max.y });
+  }
+  return list;
+}
+function stepPhysics(dt) {
+  for (const item of items) {
+    const u = item.userData;
+    if (u.heldBy !== null || u.resting) continue;
+    _box.setFromObject(item);
+    const bottomBefore = _box.min.y;
+    u.vel.y -= GRAVITY * dt;
+    u.vel.multiplyScalar(1 - 0.2 * dt); // arrasto do ar
+    item.position.addScaledVector(u.vel, dt);
+    // paredes
+    for (const k of ['x', 'z']) {
+      if (Math.abs(item.position[k]) > ROOM_LIMIT) { item.position[k] = Math.sign(item.position[k]) * ROOM_LIMIT; u.vel[k] *= -0.3; }
+    }
+    _box.setFromObject(item);
+    _box.getCenter(_c);
+    let support = 0;
+    for (const s of supportsFor(item)) {
+      if (_c.x >= s.minX && _c.x <= s.maxX && _c.z >= s.minZ && _c.z <= s.maxZ && s.top <= bottomBefore + 0.002 && s.top > support) support = s.top;
+    }
+    if (_box.min.y < support) {
+      item.position.y += support - _box.min.y;
+      if (u.vel.y < -1.2) { u.vel.y *= -0.25; u.vel.x *= 0.6; u.vel.z *= 0.6; }
+      else { u.vel.set(0, 0, 0); u.resting = true; }
+    }
+  }
+}
+function wakeAll() { for (const it of items) if (it.userData.heldBy === null) it.userData.resting = false; }
+
+function onTable(item) {
+  if (item.userData.heldBy !== null) return false;
+  _box.setFromObject(item); _box.getCenter(_c);
+  return _c.x > table.minX && _c.x < table.maxX && _c.z > table.minZ && _c.z < table.maxZ &&
+         _box.min.y > table.top - 0.01 && _box.min.y < table.top + 0.6;
+}
+const countEl = document.getElementById('count');
+let lastCount = -1, lastTotal = -1;
+function updateCount() {
+  const n = items.filter(onTable).length;
+  if (n === lastCount && items.length === lastTotal) return;
+  lastCount = n; lastTotal = items.length;
+  countEl.textContent = `Itens na mesa: ${n} / ${items.length}`;
+  countEl.classList.toggle('done', n === items.length && n > 0);
+  drawPanel(n, items.length);
+  zone.material.color.set(n === items.length && n > 0 ? 0x5ee08a : 0x4fd1ff);
+}
+
+function resetItems() {
+  for (const it of items) {
+    const u = it.userData;
+    if (u.heldBy !== null) { held[u.heldBy] = null; u.heldBy = null; }
+    scene.attach(it);
+    it.position.copy(u.home.p); it.quaternion.copy(u.home.q);
+    u.vel.set(0, 0, 0); u.resting = false;
+  }
+  if (dragging) { dragging = null; controls.enabled = true; }
+}
+document.getElementById('resetBtn').onclick = resetItems;
+
+// ---------- Destaque ----------
+const highlighted = new Set();
+function setHighlight(item, on) {
+  item.traverse(o => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) if (m.emissive) m.emissive.setHex(on ? 0x335533 : 0x000000);
+  });
+}
+function applyHighlights(next) {
+  for (const it of highlighted) if (!next.has(it)) setHighlight(it, false);
+  for (const it of next) if (!highlighted.has(it)) setHighlight(it, true);
+  highlighted.clear(); next.forEach(i => highlighted.add(i));
+}
+
+// ---------- VR: controles e mãos ----------
+const held = [null, null], presses = [0, 0], isHand = [false, false], sources = [null, null];
+const grips = [], hands = [], anchors = [], history = [[], []];
+const _p = new THREE.Vector3();
+
+for (let i = 0; i < 2; i++) {
+  const controller = renderer.xr.getController(i);
+  rig.add(controller);
+  controller.addEventListener('connected', e => { sources[i] = e.data; isHand[i] = !!e.data.hand; grips[i].visible = !isHand[i]; });
+  controller.addEventListener('disconnected', () => { release(i); sources[i] = null; presses[i] = 0; });
+  const down = () => { presses[i]++; if (!held[i]) grab(i); };
+  const up = () => { presses[i] = Math.max(0, presses[i] - 1); if (presses[i] === 0) release(i); };
+  controller.addEventListener('selectstart', down); controller.addEventListener('selectend', up);
+  controller.addEventListener('squeezestart', down); controller.addEventListener('squeezeend', up);
+
+  const grip = renderer.xr.getControllerGrip(i);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.03, 0.11), new THREE.MeshStandardMaterial({ color: 0x22252b, roughness: .4 }));
+  body.position.z = 0.03;
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.012, 12, 8), new THREE.MeshBasicMaterial({ color: 0x4fd1ff }));
+  grip.add(body, tip);
+  rig.add(grip); grips[i] = grip;
+
+  const hand = renderer.xr.getHand(i);
+  rig.add(hand); hands[i] = hand;
+
+  const anchor = new THREE.Object3D();
+  rig.add(anchor); anchors[i] = anchor;
+}
+
+const jointGeo = new THREE.SphereGeometry(1, 8, 6);
+const jointMat = new THREE.MeshStandardMaterial({ color: 0xf1c7a8, roughness: .6 });
+function updateHands() {
+  for (let i = 0; i < 2; i++) {
+    if (!isHand[i]) continue;
+    const joints = hands[i].joints;
+    for (const key in joints) {
+      const j = joints[key];
+      if (!j.userData.vis) {
+        const m = new THREE.Mesh(jointGeo, jointMat);
+        m.scale.setScalar(key.endsWith('tip') ? 0.007 : 0.009);
+        j.add(m); j.userData.vis = m;
+      }
+    }
+    const it = joints['index-finger-tip'], th = joints['thumb-tip'];
+    if (it && th) {
+      anchors[i].position.copy(it.position).add(th.position).multiplyScalar(0.5);
+      anchors[i].quaternion.copy(it.quaternion);
+    }
+  }
+}
+function anchorFor(i) { return isHand[i] ? anchors[i] : grips[i]; }
+
+function nearestItem(point, maxDist, ignore = null) {
+  let best = null, bestD = maxDist;
+  for (const it of items) {
+    if (it === ignore) continue;
+    _box.setFromObject(it);
+    const d = _box.distanceToPoint(point);
+    if (d < bestD) { bestD = d; best = it; }
+  }
+  return best;
+}
+function grab(i) {
+  const a = anchorFor(i); a.getWorldPosition(_p);
+  const item = nearestItem(_p, isHand[i] ? 0.05 : 0.07);
+  if (!item) return;
+  const u = item.userData;
+  if (u.heldBy !== null) held[u.heldBy] = null;   // passar de uma mão pra outra
+  a.attach(item);
+  u.heldBy = i; u.resting = false; u.vel.set(0, 0, 0);
+  held[i] = item; history[i].length = 0;
+  wakeAll();
+  pulse(i, 0.5, 40);
+}
+function release(i) {
+  const item = held[i]; if (!item) return;
+  scene.attach(item);
+  const u = item.userData; u.heldBy = null; u.resting = false;
+  const h = history[i];
+  if (h.length >= 2) {
+    const a = h[0], b = h[h.length - 1], dt = Math.max(1e-3, b.t - a.t);
+    u.vel.subVectors(b.p, a.p).divideScalar(dt);
+    if (u.vel.length() > 8) u.vel.setLength(8);
+  }
+  held[i] = null;
+  wakeAll();
+  pulse(i, 0.2, 20);
+}
+function pulse(i, strength, ms) {
+  try { sources[i]?.gamepad?.hapticActuators?.[0]?.pulse?.(strength, ms); } catch (e) {}
+}
+function trackHistory(time) {
+  for (let i = 0; i < 2; i++) {
+    if (!held[i]) continue;
+    const p = new THREE.Vector3(); anchorFor(i).getWorldPosition(p);
+    history[i].push({ p, t: time }); if (history[i].length > 6) history[i].shift();
+  }
+}
+
+// Locomoção: analógico esquerdo anda, direito gira (snap 30°), A/X reinicia
+const _dir = new THREE.Vector3(), _right = new THREE.Vector3(), _head = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
+let turnLatch = false, resetLatch = false;
+function updateLocomotion(dt) {
+  const session = renderer.xr.getSession(); if (!session) return;
+  const xrCam = renderer.xr.getCamera();
+  let aPressed = false;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad; if (!gp || src.hand) continue;
+    const x = gp.axes[2] ?? 0, y = gp.axes[3] ?? 0;
+    if (src.handedness === 'left') {
+      if (Math.hypot(x, y) > 0.15) {
+        xrCam.getWorldDirection(_dir); _dir.y = 0; _dir.normalize();
+        _right.set(-_dir.z, 0, _dir.x);
+        rig.position.addScaledVector(_dir, -y * 1.4 * dt).addScaledVector(_right, x * 1.4 * dt);
+        rig.position.x = THREE.MathUtils.clamp(rig.position.x, -ROOM_LIMIT + .3, ROOM_LIMIT - .3);
+        rig.position.z = THREE.MathUtils.clamp(rig.position.z, -ROOM_LIMIT + .3, ROOM_LIMIT - .3);
+      }
+    } else if (src.handedness === 'right') {
+      if (Math.abs(x) > 0.7 && !turnLatch) {
+        turnLatch = true;
+        const ang = -Math.sign(x) * Math.PI / 6;
+        xrCam.getWorldPosition(_head); _head.y = rig.position.y;
+        rig.position.sub(_head).applyAxisAngle(UP, ang).add(_head);
+        rig.rotation.y += ang;
+      } else if (Math.abs(x) < 0.3) turnLatch = false;
+    }
+    if (gp.buttons[4]?.pressed) aPressed = true;
+  }
+  if (aPressed && !resetLatch) { resetLatch = true; resetItems(); }
+  else if (!aPressed) resetLatch = false;
+}
+
+// Botão de entrar no VR
+const vrBtn = document.getElementById('vrBtn');
+const msg = document.getElementById('msg');
+(async () => {
+  let ok = false;
+  try { ok = !!navigator.xr && await navigator.xr.isSessionSupported('immersive-vr'); } catch (e) {}
+  if (!ok) {
+    vrBtn.textContent = 'VR indisponível aqui';
+    msg.textContent = 'Abra esta página no navegador do Quest a partir de um endereço https próprio (ex.: GitHub Pages). Dentro do claude.ai o VR é bloqueado.';
+    return;
+  }
+  vrBtn.disabled = false; vrBtn.textContent = 'Entrar em VR';
+  vrBtn.onclick = async () => {
+    if (renderer.xr.isPresenting) { renderer.xr.getSession().end(); return; }
+    try {
+      const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking'] });
+      await renderer.xr.setSession(session);
+      vrBtn.textContent = 'Sair do VR';
+      session.addEventListener('end', () => { vrBtn.textContent = 'Entrar em VR'; for (let i = 0; i < 2; i++) release(i); });
+    } catch (e) { msg.textContent = 'Não foi possível iniciar o VR: ' + e.message; }
+  };
+})();
+
+// ---------- Modo PC (mouse) ----------
+const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();
+const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -1.0);
+let dragging = null; const dragOffset = new THREE.Vector3(); let dragBottom = 0;
+function setNdc(e) { ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); raycaster.setFromCamera(ndc, camera); }
+function itemOf(obj) { while (obj && !items.includes(obj)) obj = obj.parent; return obj; }
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (renderer.xr.isPresenting || e.button !== 0) return;
+  setNdc(e);
+  const hit = raycaster.intersectObjects(items, true)[0];
+  if (!hit) return;
+  const item = itemOf(hit.object); if (!item || item.userData.heldBy !== null) return;
+  controls.enabled = false;
+  dragging = item; item.userData.heldBy = 'mouse'; item.userData.resting = false;
+  _box.setFromObject(item); dragBottom = item.position.y - _box.min.y;
+  const pt = new THREE.Vector3(); raycaster.ray.intersectPlane(dragPlane, pt);
+  dragOffset.set(item.position.x - pt.x, 0, item.position.z - pt.z);
+  if (dragOffset.length() > 0.15) dragOffset.set(0, 0, 0);
+  moveDrag(e);
+  wakeAll();
+  renderer.domElement.setPointerCapture(e.pointerId);
+});
+function moveDrag(e) {
+  setNdc(e);
+  const pt = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(dragPlane, pt)) return;
+  dragging.position.set(
+    THREE.MathUtils.clamp(pt.x + dragOffset.x, -ROOM_LIMIT, ROOM_LIMIT),
+    1.0 + dragBottom,
+    THREE.MathUtils.clamp(pt.z + dragOffset.z, -ROOM_LIMIT, ROOM_LIMIT));
+}
+renderer.domElement.addEventListener('pointermove', e => {
+  if (dragging) { moveDrag(e); return; }
+  if (renderer.xr.isPresenting) return;
+  setNdc(e);
+  const hit = raycaster.intersectObjects(items, true)[0];
+  renderer.domElement.style.cursor = hit ? 'grab' : 'default';
+  applyHighlights(new Set(hit ? [itemOf(hit.object)] : []));
+});
+renderer.domElement.addEventListener('pointerup', () => {
+  if (!dragging) return;
+  dragging.userData.heldBy = null; dragging.userData.resting = false; dragging.userData.vel.set(0, 0, 0);
+  dragging = null; controls.enabled = true; wakeAll();
+});
+renderer.domElement.addEventListener('wheel', e => {
+  if (!dragging) return;
+  e.preventDefault();
+  dragging.rotation.y += Math.sign(e.deltaY) * Math.PI / 12;
+}, { passive: false });
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0.3, 0.85, -0.45);
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.minDistance = 0.4; controls.maxDistance = 4;
+controls.update();
+
+// ---------- Carregar modelos .glb ----------
+const loader = new GLTFLoader();
+function readGLB(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => loader.parse(r.result, '', resolve, reject);
+    r.onerror = reject;
+    file.name.toLowerCase().endsWith('.gltf') ? r.readAsText(file) : r.readAsArrayBuffer(file);
+  });
+}
+function triCount(obj) {
+  let n = 0;
+  obj.traverse(o => { if (o.isMesh) { const g = o.geometry; n += (g.index ? g.index.count : g.attributes.position.count) / 3; } });
+  return Math.round(n);
+}
+function autoScale(obj, mmThreshold) {
+  const size = new THREE.Box3().setFromObject(obj).getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  if (maxDim > mmThreshold) { obj.scale.multiplyScalar(0.001); return true; }
+  return false;
+}
+
+document.getElementById('envFile').addEventListener('change', async e => {
+  const file = e.target.files[0]; if (!file) return;
+  msg.textContent = 'Carregando ambiente…';
+  try {
+    const gltf = await readGLB(file);
+    const env = gltf.scene;
+    const mm = autoScale(env, 300);
+    env.traverse(o => { if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; } });
+    scene.remove(environment); environment = env; scene.add(env);
+    const tris = triCount(env);
+    msg.textContent = `Ambiente "${file.name}" carregado: ${tris.toLocaleString('pt-BR')} triângulos${mm ? ' (convertido de mm para m)' : ''}.` +
+      (tris > 500000 ? ' Atenção: pesado demais para o Quest; reduza os polígonos.' : '');
+  } catch (err) { msg.textContent = 'Erro ao ler o ambiente: ' + err.message; }
+  e.target.value = '';
+});
+
+document.getElementById('itemFile').addEventListener('change', async e => {
+  for (const file of e.target.files) {
+    msg.textContent = `Carregando ${file.name}…`;
+    try {
+      const gltf = await readGLB(file);
+      const obj = gltf.scene;
+      const mm = autoScale(obj, 3);
+      // centraliza a peça na origem (ponto de pegada)
+      const center = new THREE.Box3().setFromObject(obj).getCenter(new THREE.Vector3());
+      obj.position.sub(center);
+      const name = file.name.replace(/\.(glb|gltf)$/i, '');
+      registerItem(obj, name, nextBenchPos()).userData.home.p.y = 1.0;
+      const tris = triCount(obj);
+      msg.textContent = `Item "${name}": ${tris.toLocaleString('pt-BR')} triângulos${mm ? ' (convertido de mm para m)' : ''}.` +
+        (tris > 50000 ? ' Atenção: peça pesada; use Decimate no Blender.' : '');
+    } catch (err) { msg.textContent = `Erro ao ler ${file.name}: ` + err.message; }
+  }
+  e.target.value = '';
+});
+
+// ---------- UI ----------
+const ui = document.getElementById('ui');
+document.getElementById('toggle').onclick = () => {
+  ui.classList.toggle('min');
+  document.getElementById('toggle').textContent = ui.classList.contains('min') ? '+' : '–';
+};
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+window.game = { items, scene, camera, table }; // acesso para depuração no console
+
+// ---------- Loop ----------
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const time = clock.elapsedTime;
+  if (renderer.xr.isPresenting) {
+    updateHands();
+    updateLocomotion(dt);
+    trackHistory(time);
+    const next = new Set();
+    for (let i = 0; i < 2; i++) {
+      if (held[i] || !sources[i]) continue;
+      anchorFor(i).getWorldPosition(_p);
+      const it = nearestItem(_p, isHand[i] ? 0.05 : 0.07);
+      if (it) next.add(it);
+    }
+    applyHighlights(next);
+  }
+  stepPhysics(dt);
+  updateCount();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
