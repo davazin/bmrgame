@@ -78,10 +78,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 // ---------- Configuração ----------
-const ROOM = 8;          // tamanho do piso (m)
-const ROOM_LIMIT = 3.8;  // limite onde itens e jogador podem ir
 const GRAVITY = 9.81;
 
 // ---------- Renderer / cena ----------
@@ -96,7 +96,7 @@ renderer.xr.setReferenceSpaceType('local-floor');
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x9fb4c7);
+scene.background = new THREE.Color(0xe8ecef);
 // Reflexos (deixam o inox e o cromado com cara de metal)
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
 
@@ -106,46 +106,261 @@ const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.02, 1
 camera.position.set(-0.35, 1.5, 0.95);
 rig.add(camera);
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x6b5a48, 0.5));
-const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-sun.position.set(2, 4, 1.5);
+// Iluminação do laboratório: luz geral + luz principal vinda do forro (com sombras) + 2 luzes dos painéis
+scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa3ab, 0.75));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(0.6, 2.75, 0.8);
+sun.target.position.set(0, 0, -0.6); scene.add(sun.target);
+for (const [x, z] of [[-1.8, 0.4], [1.8, 0.4]]) {
+  const p = new THREE.PointLight(0xfff8f0, 3, 6, 2); p.position.set(x, 2.6, z); scene.add(p);
+}
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
-Object.assign(sun.shadow.camera, { left: -2.5, right: 2.5, top: 2.5, bottom: -2.5, near: 0.5, far: 10 });
+Object.assign(sun.shadow.camera, { left: -3.2, right: 3.2, top: 3.2, bottom: -3.2, near: 0.1, far: 6 });
+sun.shadow.bias = -0.0005;
 scene.add(sun);
 
-// ---------- Ambiente provisório (substituível pelo .glb do SketchUp) ----------
-let environment = buildPlaceholderRoom();
-scene.add(environment);
+// ---------- Laboratório (ambiente da sala; substituível pelo .glb do SketchUp) ----------
+// Sala: x de -3 a 3, z de -1,4 (parede atrás da capela) a 3, pé-direito 2,8 m
+const LAB = { minX: -3, maxX: 3, minZ: -1.4, maxZ: 3, H: 2.8 };
+const BENCH_TOP = 0.9;
+const benchesLab = [ { x0: -2.95, x1: -1.1, sink: false }, { x0: 1.05, x1: 2.95, sink: true } ]; // ao longo da parede do fundo
 
-function gridTexture() {
-  const c = document.createElement('canvas'); c.width = c.height = 256;
-  const g = c.getContext('2d');
-  g.fillStyle = '#b9ad9c'; g.fillRect(0, 0, 256, 256);
-  g.strokeStyle = '#a39683'; g.lineWidth = 4; g.strokeRect(0, 0, 256, 256);
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(ROOM, ROOM);
-  t.colorSpace = THREE.SRGBColorSpace;
+function canvasTex(w, h, draw, repeat) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(...repeat); }
   return t;
 }
-function buildPlaceholderRoom() {
+function seeded(seed) { return () => (seed = (seed * 16807) % 2147483647) / 2147483647; }
+
+function buildLab() {
+  const W = LAB.maxX - LAB.minX, D = LAB.maxZ - LAB.minZ, H = LAB.H;
   const g = new THREE.Group();
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM, ROOM), new THREE.MeshStandardMaterial({ map: gridTexture(), roughness: .9 }));
-  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; g.add(floor);
-  const wallMat = new THREE.MeshStandardMaterial({ color: 0xe9e4da, roughness: 1 });
-  const H = 3, T = 0.1, h = ROOM / 2;
-  [[0, -h, ROOM, T], [0, h, ROOM, T], [-h, 0, T, ROOM], [h, 0, T, ROOM]].forEach(([x, z, w, d]) => {
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, H, d), wallMat);
-    wall.position.set(x, H / 2, z); wall.receiveShadow = true; g.add(wall);
-  });
+  const parts = new Map();   // geometrias agrupadas por material (poucas draw calls no Quest)
+  const put = (geo, mat, x, y, z, ry = 0) => {
+    if (ry) geo.rotateY(ry);
+    geo.translate(x, y, z);
+    if (!parts.has(mat)) parts.set(mat, []);
+    parts.get(mat).push(geo);
+  };
+  const box = (x0, y0, z0, x1, y1, z1, mat) =>
+    put(new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0), mat, (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  const cylY = (r, y0, y1, x, z, mat, seg = 24) => put(new THREE.CylinderGeometry(r, r, y1 - y0, seg), mat, x, (y0 + y1) / 2, z);
+  const S = (o) => new THREE.MeshStandardMaterial(o);
+
+  // Materiais
+  const piso = S({ roughness: 0.55, map: canvasTex(512, 512, (c, w, h) => {
+    c.fillStyle = '#d3d9dc'; c.fillRect(0, 0, w, h);
+    const r = seeded(7);
+    for (let i = 0; i < 2600; i++) {
+      c.fillStyle = r() < 0.5 ? 'rgba(90,105,115,.18)' : 'rgba(255,255,255,.35)';
+      c.fillRect(r() * w, r() * h, 2 + r() * 3, 2 + r() * 3);
+    }
+    c.strokeStyle = 'rgba(120,130,138,.35)'; c.lineWidth = 2; c.strokeRect(0, 0, w, h);
+  }, [W / 2, D / 2]) });
+  const forro = S({ roughness: 1, map: canvasTex(256, 256, (c, w, h) => {
+    c.fillStyle = '#f3f4f5'; c.fillRect(0, 0, w, h);
+    const r = seeded(3); c.fillStyle = 'rgba(0,0,0,.06)';
+    for (let i = 0; i < 900; i++) c.fillRect(r() * w, r() * h, 1.5, 1.5);
+    c.strokeStyle = '#c9ced3'; c.lineWidth = 6; c.strokeRect(0, 0, w, h);
+  }, [W / 0.625, D / 0.625]) });
+  forro.emissive = new THREE.Color(0xffffff); forro.emissiveMap = forro.map; forro.emissiveIntensity = 0.45;  // forro claro
+  const parede = S({ color: 0xe8ecef, roughness: 0.9 });
+  const rodape = S({ color: 0x7f8992, roughness: 0.6 });
+  const faixa = S({ color: 0x005b9a, roughness: 0.5 });
+  const branco = S({ color: 0xf3f5f6, roughness: 0.45 });
+  const tampo = S({ color: 0x2a2e33, roughness: 0.3 });
+  const escuro = S({ color: 0x3a4047, roughness: 0.6 });
+  const inox = S({ color: 0xc9cdd2, metalness: 1, roughness: 0.3 });
+  const vidro = S({ color: 0xcfe4ec, roughness: 0.05, transparent: true, opacity: 0.22, depthWrite: false });
+  const vidroEscuro = S({ color: 0x23292f, roughness: 0.08, metalness: 0.2 });
+  const equip = S({ color: 0xdde1e4, roughness: 0.4 });
+  const azul = S({ color: 0x1f6fb2, roughness: 0.4 });
+  const ambar = S({ color: 0x7a3a0c, roughness: 0.2 });
+  const vermelho = S({ color: 0xc62828, roughness: 0.35 });
+  const portaMat = S({ color: 0xc9d1d7, roughness: 0.5 });
+  const batente = S({ color: 0x8d969e, roughness: 0.5 });
+  const led = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const grelha = S({ color: 0xd2d6da, roughness: 0.7 });
+  const caixaCores = [0xffffff, 0x1f6fb2, 0x2e7d32, 0xef6c00, 0xc62828].map(c => S({ color: c, roughness: 0.6 }));
+
+  // Piso e forro
+  const fl = new THREE.PlaneGeometry(W, D); fl.rotateX(-Math.PI / 2);
+  put(fl, piso, (LAB.minX + LAB.maxX) / 2, 0, (LAB.minZ + LAB.maxZ) / 2);
+  const ce = new THREE.PlaneGeometry(W, D); ce.rotateX(Math.PI / 2);
+  put(ce, forro, (LAB.minX + LAB.maxX) / 2, H, (LAB.minZ + LAB.maxZ) / 2);
+
+  // Paredes, rodapé e faixa azul
+  const T = 0.1;
+  box(LAB.minX - T, 0, LAB.minZ - T, LAB.maxX + T, H, LAB.minZ, parede);
+  box(LAB.minX - T, 0, LAB.maxZ, LAB.maxX + T, H, LAB.maxZ + T, parede);
+  box(LAB.minX - T, 0, LAB.minZ, LAB.minX, H, LAB.maxZ, parede);
+  box(LAB.maxX, 0, LAB.minZ, LAB.maxX + T, H, LAB.maxZ, parede);
+  const door = { z0: 1.05, z1: 2.15 };      // porta na parede direita
+  const trim = (y0, y1, mat, e = 0.012) => {
+    box(LAB.minX, y0, LAB.minZ, LAB.maxX, y1, LAB.minZ + e, mat);
+    box(LAB.minX, y0, LAB.maxZ - e, LAB.maxX, y1, LAB.maxZ, mat);
+    box(LAB.minX, y0, LAB.minZ, LAB.minX + e, y1, LAB.maxZ, mat);
+    box(LAB.maxX - e, y0, LAB.minZ, LAB.maxX, y1, door.z0 - 0.08, mat);
+    box(LAB.maxX - e, y0, door.z1 + 0.08, LAB.maxX, y1, LAB.maxZ, mat);
+  };
+  trim(0, 0.1, rodape, 0.015);
+  trim(1.02, 1.1, faixa);
+
+  // Bancadas com gabinetes, tampo em epóxi preto e armários aéreos com porta de vidro
+  for (const b of benchesLab) {
+    const z0 = LAB.minZ, z1 = LAB.minZ + 0.65, { x0, x1 } = b;
+    box(x0 + 0.02, 0, z0, x1 - 0.02, 0.1, z1 - 0.07, escuro);         // rodapé recuado
+    box(x0, 0.1, z0, x1, 0.86, z1 - 0.02, branco);                    // gabinete
+    const n = Math.max(1, Math.round((x1 - x0) / 0.5)), dw = (x1 - x0) / n;
+    for (let i = 0; i < n; i++) {
+      const xa = x0 + i * dw, xc = xa + dw / 2;
+      if (i > 0) box(xa - 0.003, 0.12, z1 - 0.021, xa + 0.003, 0.845, z1 - 0.017, escuro);
+      box(xc - 0.07, 0.745, z1 - 0.02, xc + 0.07, 0.758, z1 + 0.004, inox);   // puxador da gaveta
+      box(xc - 0.07, 0.58, z1 - 0.02, xc + 0.07, 0.593, z1 + 0.004, inox);    // puxador da porta
+    }
+    box(x0 + 0.01, 0.678, z1 - 0.021, x1 - 0.01, 0.684, z1 - 0.017, escuro);
+    box(x0 - 0.01, 0.86, z0, x1 + 0.01, BENCH_TOP, z1 + 0.02, tampo);
+    box(x0, BENCH_TOP, z0, x1, 1.0, z0 + 0.015, tampo);                // espelho do tampo
+    // armário aéreo
+    const za = z0 + 0.35, y0 = 1.5, y1 = 2.2;
+    box(x0, y0, z0, x1, y1, z0 + 0.02, branco);
+    box(x0, y0, z0, x0 + 0.02, y1, za, branco); box(x1 - 0.02, y0, z0, x1, y1, za, branco);
+    box(x0, y0, z0, x1, y0 + 0.02, za, branco); box(x0, y1 - 0.02, z0, x1, y1, za, branco);
+    box(x0 + 0.02, 1.84, z0 + 0.02, x1 - 0.02, 1.86, za - 0.02, branco);
+    for (let i = 1; i < n; i++) box(x0 + i * dw - 0.012, y0, za - 0.012, x0 + i * dw + 0.012, y1, za, branco);
+    box(x0 + 0.02, y0 + 0.02, za - 0.01, x1 - 0.02, y1 - 0.02, za - 0.004, vidro);
+    // frascos e caixas nas prateleiras
+    const r = seeded(Math.round((x0 + 5) * 100));
+    for (const shelf of [y0 + 0.02, 1.86]) {
+      for (let x = x0 + 0.08; x < x1 - 0.08; x += 0.07 + r() * 0.06) {
+        const k = r(), z = z0 + 0.1 + r() * 0.12;
+        if (k < 0.45) cylY(0.025 + r() * 0.015, shelf, shelf + 0.09 + r() * 0.08, x, z, k < 0.25 ? ambar : branco, 12);
+        else if (k < 0.85) { const w = 0.05 + r() * 0.05, h = 0.07 + r() * 0.1; box(x - w / 2, shelf, z - 0.04, x + w / 2, shelf + h, z + 0.04, caixaCores[Math.floor(r() * 5)]); x += w / 2; }
+      }
+    }
+    if (b.sink) {                                          // pia em inox com torneira
+      const xs = x1 - 0.55, zc = z0 + 0.36;
+      box(xs - 0.26, BENCH_TOP - 0.004, zc - 0.21, xs + 0.26, BENCH_TOP + 0.004, zc + 0.21, inox);
+      box(xs - 0.22, BENCH_TOP + 0.004, zc - 0.17, xs + 0.22, BENCH_TOP + 0.006, zc + 0.17, escuro);
+      cylY(0.016, BENCH_TOP, 1.2, xs, z0 + 0.09, inox);
+      box(xs - 0.012, 1.19, z0 + 0.08, xs + 0.012, 1.215, z0 + 0.3, inox);
+      cylY(0.012, 1.14, 1.2, xs, z0 + 0.29, inox);
+      box(xs + 0.33, 1.12, z0, xs + 0.43, 1.3, z0 + 0.09, branco);      // saboneteira
+      box(xs - 0.62, 1.08, z0, xs - 0.32, 1.42, z0 + 0.12, branco);     // papel-toalha
+      box(xs - 0.6, 1.1, z0 + 0.12, xs - 0.34, 1.13, z0 + 0.125, escuro);
+    }
+  }
+  // Microscópio e centrífuga na bancada da esquerda
+  const tb = BENCH_TOP, mz = LAB.minZ + 0.3;
+  box(-2.56, tb, mz - 0.1, -2.36, tb + 0.03, mz + 0.1, equip);
+  box(-2.48, tb + 0.03, mz - 0.09, -2.44, tb + 0.34, mz - 0.03, equip);
+  box(-2.52, tb + 0.27, mz - 0.08, -2.40, tb + 0.36, mz + 0.06, equip);
+  box(-2.54, tb + 0.13, mz - 0.02, -2.38, tb + 0.145, mz + 0.09, escuro);
+  cylY(0.012, tb + 0.18, tb + 0.27, -2.46, mz + 0.03, escuro, 12);
+  cylY(0.011, tb + 0.36, tb + 0.43, -2.475, mz + 0.0, escuro, 12);
+  cylY(0.011, tb + 0.36, tb + 0.43, -2.445, mz + 0.0, escuro, 12);
+  cylY(0.18, tb, tb + 0.25, -1.62, mz, equip, 32);
+  cylY(0.17, tb + 0.25, tb + 0.27, -1.62, mz, azul, 32);
+  box(-1.7, tb + 0.06, mz + 0.16, -1.54, tb + 0.18, mz + 0.185, escuro);
+  // Estufa na bancada da direita
+  box(1.15, tb, LAB.minZ + 0.03, 1.75, 1.4, LAB.minZ + 0.6, equip);
+  box(1.19, tb + 0.05, LAB.minZ + 0.6, 1.6, 1.36, LAB.minZ + 0.606, vidroEscuro);
+  box(1.63, tb + 0.12, LAB.minZ + 0.6, 1.72, 1.32, LAB.minZ + 0.606, escuro);
+  box(1.645, 1.22, LAB.minZ + 0.606, 1.705, 1.27, LAB.minZ + 0.609, azul);
+
+  // Geladeira de medicamentos (porta de vidro) na parede esquerda
+  const fx0 = LAB.minX + 0.03, fx1 = LAB.minX + 0.68, fz0 = 0.3, fz1 = 0.95, fy = 1.85;
+  box(fx0, 0, fz0, fx1, fy, fz0 + 0.03, branco); box(fx0, 0, fz1 - 0.03, fx1, fy, fz1, branco);
+  box(fx0, 0, fz0, fx0 + 0.03, fy, fz1, branco); box(fx0, 0, fz0, fx1, 0.15, fz1, branco);
+  box(fx0, fy - 0.2, fz0, fx1, fy, fz1, branco);
+  box(fx1 - 0.005, fy - 0.15, fz0 + 0.2, fx1 + 0.002, fy - 0.08, fz1 - 0.2, azul);  // display
+  for (const y of [0.55, 0.95, 1.3]) {
+    box(fx0 + 0.03, y, fz0 + 0.03, fx1 - 0.06, y + 0.012, fz1 - 0.03, inox);
+    const r = seeded(Math.round(y * 100));
+    for (let z = fz0 + 0.07; z < fz1 - 0.08; z += 0.09) box(fx0 + 0.1, y + 0.012, z - 0.035, fx0 + 0.1 + 0.08 + r() * 0.15, y + 0.06 + r() * 0.08, z + 0.035, caixaCores[Math.floor(r() * 5)]);
+  }
+  box(fx1 - 0.03, 0.15, fz0 + 0.02, fx1, fy - 0.2, fz1 - 0.02, vidro);
+  box(fx1, 0.6, fz1 - 0.07, fx1 + 0.03, 1.3, fz1 - 0.05, inox);                   // puxador
+
+  // Porta, extintor e interruptor na parede direita
+  const dx = LAB.maxX;
+  box(dx - 0.06, 0, door.z0 - 0.08, dx, 2.2, door.z0, batente);
+  box(dx - 0.06, 0, door.z1, dx, 2.2, door.z1 + 0.08, batente);
+  box(dx - 0.06, 2.12, door.z0 - 0.08, dx, 2.2, door.z1 + 0.08, batente);
+  box(dx - 0.045, 0, door.z0, dx - 0.005, 2.12, door.z1, portaMat);
+  box(dx - 0.047, 1.25, door.z0 + 0.35, dx - 0.044, 1.75, door.z1 - 0.35, vidroEscuro);
+  box(dx - 0.1, 1.02, door.z0 + 0.08, dx - 0.045, 1.045, door.z0 + 0.22, inox);
+  box(dx - 0.012, 1.05, door.z0 - 0.3, dx, 1.15, door.z0 - 0.2, branco);
+  cylY(0.085, 0.55, 1.02, dx - 0.12, 0.35, vermelho, 20);
+  cylY(0.03, 1.02, 1.1, dx - 0.12, 0.35, escuro, 12);
+  box(dx - 0.012, 1.25, 0.2, dx, 1.5, 0.5, vermelho);
+
+  // Painéis de LED e grelhas de ar no forro
+  for (const x of [-1.8, 0, 1.8]) for (const z of [-0.75, 1.6]) {
+    box(x - 0.31, H - 0.02, z - 0.31, x + 0.31, H, z + 0.31, grelha);
+    box(x - 0.29, H - 0.025, z - 0.29, x + 0.29, H - 0.015, z + 0.29, led);
+  }
+  for (const [x, z] of [[-0.9, 0.4], [0.9, 2.5]]) {
+    box(x - 0.25, H - 0.015, z - 0.25, x + 0.25, H, z + 0.25, grelha);
+    for (let i = -4; i <= 4; i++) box(x - 0.22, H - 0.02, z + i * 0.05 - 0.008, x + 0.22, H - 0.015, z + i * 0.05 + 0.008, escuro);
+  }
+
+  // Une as geometrias por material
+  for (const [mat, geos] of parts) {
+    const mesh = new THREE.Mesh(mergeGeometries(geos), mat);
+    mesh.receiveShadow = mat !== led;
+    mesh.castShadow = !(mat === piso || mat === forro || mat === parede || mat === led || mat === vidro);
+    g.add(mesh);
+  }
+
+  // Placas e quadros (texturas desenhadas no código)
+  const plane = (w, h, tex, x, y, z, ry) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 }));
+    m.position.set(x, y, z); m.rotation.y = ry; g.add(m); return m;
+  };
+  plane(0.6, 0.8, canvasTex(600, 800, (c) => {
+    c.fillStyle = '#ffffff'; c.fillRect(0, 0, 600, 800);
+    c.fillStyle = '#005b9a'; c.fillRect(0, 0, 600, 130);
+    c.fillStyle = '#fff'; c.font = 'bold 52px system-ui, sans-serif'; c.textAlign = 'center';
+    c.fillText('BOAS PRÁTICAS', 300, 85);
+    c.fillStyle = '#9b3123'; c.font = 'bold 34px system-ui, sans-serif'; c.fillText('Capela de Fluxo Laminar', 300, 190);
+    c.textAlign = 'left'; c.fillStyle = '#222'; c.font = '30px system-ui, sans-serif';
+    ['1. Higienize as mãos', '2. Use luvas, máscara e jaleco', '3. Ligue a capela 15 min antes', '4. Limpe a bancada com álcool 70%',
+     '5. Trabalhe a 15 cm da borda', '6. Evite movimentos bruscos', '7. Não bloqueie as grelhas']
+      .forEach((t, i) => c.fillText(t, 50, 270 + i * 72));
+  }), LAB.minX + 0.012, 1.55, 1.85, Math.PI / 2);
+  plane(0.42, 0.14, canvasTex(420, 140, (c) => {
+    c.fillStyle = '#005b9a'; c.fillRect(0, 0, 420, 140);
+    c.fillStyle = '#fff'; c.font = 'bold 44px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText('LABORATÓRIO', 210, 88);
+  }), dx - 0.05, 1.95, (door.z0 + door.z1) / 2, -Math.PI / 2);
+  plane(0.26, 0.24, canvasTex(260, 240, (c) => {
+    c.fillStyle = '#c62828'; c.fillRect(0, 0, 260, 240);
+    c.fillStyle = '#fff'; c.font = 'bold 40px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText('EXTINTOR', 130, 135);
+  }), dx - 0.014, 1.375, 0.35, -Math.PI / 2);
+  const clock = plane(0.34, 0.34, canvasTex(340, 340, (c) => {
+    c.fillStyle = '#fff'; c.beginPath(); c.arc(170, 170, 160, 0, 7); c.fill();
+    c.lineWidth = 12; c.strokeStyle = '#3a4047'; c.stroke();
+    c.fillStyle = '#222';
+    for (let i = 0; i < 12; i++) { const a = i * Math.PI / 6; c.fillRect(170 + Math.sin(a) * 130 - 4, 170 - Math.cos(a) * 130 - 12, 8, 24); }
+    c.lineCap = 'round'; c.strokeStyle = '#222';
+    c.lineWidth = 10; c.beginPath(); c.moveTo(170, 170); c.lineTo(170 + 70, 170 - 40); c.stroke();
+    c.lineWidth = 7; c.beginPath(); c.moveTo(170, 170); c.lineTo(170 - 20, 170 - 110); c.stroke();
+  }), 0, 2.2, LAB.maxZ - 0.012, Math.PI);
+  clock.material.transparent = true;
   return g;
 }
+
+let environment = buildLab();
+scene.add(environment);
 
 // ---------- Capela de fluxo laminar (alvo) e bancada (onde os itens começam) ----------
 const surfaces = []; // superfícies de apoio estáticas
 function makeTable({ x, z, w, d, h, color, isTarget }) {
   const g = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: .7 });
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: .35, metalness: .7 });  // mesa auxiliar em inox
   const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.04, d), mat);
   top.position.y = h - 0.02; top.castShadow = top.receiveShadow = true; g.add(top);
   const legGeo = new THREE.BoxGeometry(0.05, h - 0.04, 0.05);
@@ -176,12 +391,24 @@ addCollider(-0.75, 0.56, -0.80, 0.75, 2.087, -0.774); // fundo
 addCollider(-0.75, 1.0, -0.10, 0.75, 2.087, 0);      // vidro frontal / painel acima da abertura
 addCollider(-0.75, 1.28, -0.80, 0.75, 2.087, 0);     // teto interno (filtro)
 addCollider(-0.75, 0.0, -0.80, 0.75, 0.56, 0);       // embaixo da bancada (pés)
+// Móveis do laboratório: tampos servem de apoio, corpos bloqueiam os itens
+const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
+for (const b of benchesLab) {
+  surfaces.push({ minX: b.x0, maxX: b.x1, minZ: LAB.minZ, maxZ: LAB.minZ + 0.67, top: BENCH_TOP });
+  colliders.push(new THREE.Box3(V3(b.x0, 0, LAB.minZ), V3(b.x1, BENCH_TOP - 0.02, LAB.minZ + 0.67)));
+  colliders.push(new THREE.Box3(V3(b.x0, 1.5, LAB.minZ), V3(b.x1, 2.2, LAB.minZ + 0.35)));
+}
+colliders.push(new THREE.Box3(V3(-2.56, BENCH_TOP, LAB.minZ + 0.2), V3(-2.36, BENCH_TOP + 0.43, LAB.minZ + 0.4)));   // microscópio
+colliders.push(new THREE.Box3(V3(-1.8, BENCH_TOP, LAB.minZ + 0.12), V3(-1.44, BENCH_TOP + 0.27, LAB.minZ + 0.49))); // centrífuga
+colliders.push(new THREE.Box3(V3(1.15, BENCH_TOP, LAB.minZ), V3(1.75, 1.4, LAB.minZ + 0.61)));                     // estufa
+colliders.push(new THREE.Box3(V3(LAB.minX, 0, 0.3), V3(LAB.minX + 0.7, 1.85, 0.95)));                             // geladeira
+
 // Luz interna da capela
 const lamp = new THREE.PointLight(0xffffff, 1.2, 1.6);
 lamp.position.set(0, 1.2, CZ - 0.45);
 scene.add(lamp);
 
-makeTable({ x: 0.75, z: 0.05, w: 0.4, d: 0.8, h: 0.75, color: 0x5d6670, isTarget: false });
+makeTable({ x: 0.75, z: 0.05, w: 0.4, d: 0.8, h: 0.75, color: 0xb4bbc2, isTarget: false });
 
 // Faixa luminosa marcando a área da mesa
 const zone = new THREE.Mesh(
@@ -368,7 +595,8 @@ function stepPhysics(dt) {
     item.position.addScaledVector(u.vel, dt);
     // paredes
     for (const k of ['x', 'z']) {
-      if (Math.abs(item.position[k]) > ROOM_LIMIT) { item.position[k] = Math.sign(item.position[k]) * ROOM_LIMIT; u.vel[k] *= -0.3; }
+      const lo = (k === 'x' ? LAB.minX : LAB.minZ) + 0.05, hi = (k === 'x' ? LAB.maxX : LAB.maxZ) - 0.05;
+      if (item.position[k] < lo || item.position[k] > hi) { item.position[k] = THREE.MathUtils.clamp(item.position[k], lo, hi); u.vel[k] *= -0.3; }
     }
     _box.setFromObject(item);
     _box.getCenter(_c);
@@ -452,9 +680,98 @@ function applyHighlights(next) {
   highlighted.clear(); next.forEach(i => highlighted.add(i));
 }
 
+// ---------- Mãos com luvas nitrílicas azuis ----------
+const gloveMat = new THREE.MeshStandardMaterial({ color: 0x5b8fe3, roughness: 0.42, metalness: 0 });
+const _UP = new THREE.Vector3(0, 1, 0), _d = new THREE.Vector3(), _m4 = new THREE.Matrix4(), _s = new THREE.Vector3();
+const _qa = new THREE.Quaternion();
+class GloveHand {
+  constructor(parent) {
+    this.group = new THREE.Group(); this.group.visible = false; parent.add(this.group);
+    this.spheres = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 14, 10), gloveMat, 32);
+    this.cyls = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 14, 1, false), gloveMat, 32);
+    this.palm = new THREE.Mesh(new RoundedBoxGeometry(0.082, 0.03, 0.092, 4, 0.0145), gloveMat);
+    for (const m of [this.spheres, this.cyls, this.palm]) { m.castShadow = true; m.frustumCulled = false; this.group.add(m); }
+  }
+  begin() { this.ns = 0; this.nc = 0; }
+  sphere(p, r) { _m4.compose(p, _qa.identity(), _s.setScalar(r)); this.spheres.setMatrixAt(this.ns++, _m4); }
+  bone(p, q, r) {
+    _d.subVectors(q, p); const len = _d.length(); if (len < 1e-5) return;
+    _qa.setFromUnitVectors(_UP, _d.divideScalar(len));
+    _m4.compose(_s.addVectors(p, q).multiplyScalar(0.5), _qa, new THREE.Vector3(r, len, r));
+    this.cyls.setMatrixAt(this.nc++, _m4);
+  }
+  chain(pts, radii) {
+    for (let k = 0; k < pts.length; k++) {
+      this.sphere(pts[k], radii[k]);
+      if (k) this.bone(pts[k - 1], pts[k], Math.min(radii[k - 1], radii[k]));
+    }
+  }
+  end() {
+    this.spheres.count = this.ns; this.cyls.count = this.nc;
+    this.spheres.instanceMatrix.needsUpdate = true; this.cyls.instanceMatrix.needsUpdate = true;
+  }
+}
+const FINGERS = ['index-finger', 'middle-finger', 'ring-finger', 'pinky-finger'];
+const FR = [0.0095, 0.0088, 0.008, 0.0074];   // raio das falanges (proximal → ponta)
+
+// Mãos com rastreamento: a luva segue as articulações reais
+function drawTrackedGlove(glove, joints) {
+  const J = n => joints[n]?.position;
+  const w = J('wrist'), mm = joints['middle-finger-metacarpal'], mp = J('middle-finger-phalanx-proximal');
+  if (!w || !mm || !mp) { glove.group.visible = false; return; }
+  glove.group.visible = true; glove.begin();
+  const rad = (n, d) => joints[n]?.jointRadius || d;
+  for (const f of FINGERS) {
+    const names = [`${f}-metacarpal`, `${f}-phalanx-proximal`, `${f}-phalanx-intermediate`, `${f}-phalanx-distal`, `${f}-tip`];
+    if (!names.every(J)) continue;
+    glove.chain(names.map(J), names.map((n, k) => rad(n, [0.009, ...FR][k]) * 1.08));
+  }
+  const th = ['thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip'];
+  if (th.every(J)) glove.chain(th.map(J), th.map((n, k) => rad(n, [0.012, 0.011, 0.0095, 0.0085][k]) * 1.08));
+  glove.sphere(w, 0.022);
+  // punho da luva, na direção do antebraço (+Z da articulação do pulso)
+  _d.set(0, 0, 1).applyQuaternion(joints['wrist'].quaternion);
+  glove.bone(w, w.clone().addScaledVector(_d, 0.1), 0.026);
+  glove.end();
+  glove.palm.position.addVectors(w, mp).multiplyScalar(0.5);
+  glove.palm.quaternion.copy(mm.quaternion);
+}
+
+// Mãos nos controles: pose gerada (aberta ↔ fechada) no espaço do grip
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+const KNUCKLE = [V(0.028, -0.014, -0.027), V(0.03, -0.018, -0.008), V(0.028, -0.015, 0.011), V(0.024, -0.01, 0.028)];
+const PHAL = [[0.042, 0.026, 0.02], [0.046, 0.029, 0.021], [0.043, 0.027, 0.02], [0.034, 0.021, 0.018]];
+const OPEN = [0.15, 0.2, 0.12], FIST = [0.65, 1.3, 0.95];
+const THUMB_OPEN = [V(0.032, 0.05, -0.022), V(0.02, 0.012, -0.045), V(0.006, -0.022, -0.06), V(-0.004, -0.045, -0.066)];
+const THUMB_FIST = [V(0.032, 0.05, -0.022), V(0.02, 0.012, -0.045), V(0.0, -0.012, -0.048), V(-0.02, -0.026, -0.04)];
+const WRIST = V(0.036, 0.078, 0), PALM_C = V(0.034, 0.032, 0);
+function drawControllerGlove(glove, curl, left) {
+  const sx = left ? -1 : 1, mir = v => (v.x *= sx, v);
+  glove.group.visible = true; glove.begin();
+  KNUCKLE.forEach((k0, f) => {
+    let p = k0.clone(), th = 0; const pts = [mir(p.clone())];
+    for (let s = 0; s < 3; s++) {
+      th += THREE.MathUtils.lerp(OPEN[s], FIST[s], curl);
+      p = p.clone().add(V(-Math.sin(th), -Math.cos(th), 0).multiplyScalar(PHAL[f][s]));
+      pts.push(mir(p.clone()));
+    }
+    glove.chain(pts, FR);
+  });
+  glove.chain(THUMB_OPEN.map((a, k) => mir(a.clone().lerp(THUMB_FIST[k], curl))), [0.012, 0.011, 0.0095, 0.0085]);
+  const w = mir(WRIST.clone());
+  glove.sphere(w, 0.022);
+  glove.bone(w, w.clone().add(V(0, 0.1, 0)), 0.026);
+  glove.end();
+  glove.palm.position.copy(mir(PALM_C.clone()));
+  // eixos da palma: X ao longo dos nós dos dedos, -Y saindo da palma, -Z em direção aos dedos
+  _m4.makeBasis(V(0, 0, sx), V(sx, 0, 0), V(0, 1, 0));
+  glove.palm.quaternion.setFromRotationMatrix(_m4);
+}
+
 // ---------- VR: controles e mãos ----------
 const held = [null, null], presses = [0, 0], isHand = [false, false], sources = [null, null];
 const grips = [], hands = [], anchors = [], history = [[], []];
+const glovesCtrl = [], glovesHand = [], curls = [0.25, 0.25];
 const _p = new THREE.Vector3();
 
 for (let i = 0; i < 2; i++) {
@@ -468,37 +785,38 @@ for (let i = 0; i < 2; i++) {
   controller.addEventListener('squeezestart', down); controller.addEventListener('squeezeend', up);
 
   const grip = renderer.xr.getControllerGrip(i);
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.03, 0.11), new THREE.MeshStandardMaterial({ color: 0x22252b, roughness: .4 }));
-  body.position.z = 0.03;
-  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.012, 12, 8), new THREE.MeshBasicMaterial({ color: 0x4fd1ff }));
-  grip.add(body, tip);
   rig.add(grip); grips[i] = grip;
+  glovesCtrl[i] = new GloveHand(grip);      // luva quando estiver usando o controle
 
   const hand = renderer.xr.getHand(i);
   rig.add(hand); hands[i] = hand;
+  glovesHand[i] = new GloveHand(rig);       // luva no rastreamento de mãos
 
   const anchor = new THREE.Object3D();
   rig.add(anchor); anchors[i] = anchor;
 }
 
-const jointGeo = new THREE.SphereGeometry(1, 8, 6);
-const jointMat = new THREE.MeshStandardMaterial({ color: 0xf1c7a8, roughness: .6 });
-function updateHands() {
+function updateHands(dt) {
   for (let i = 0; i < 2; i++) {
-    if (!isHand[i]) continue;
-    const joints = hands[i].joints;
-    for (const key in joints) {
-      const j = joints[key];
-      if (!j.userData.vis) {
-        const m = new THREE.Mesh(jointGeo, jointMat);
-        m.scale.setScalar(key.endsWith('tip') ? 0.007 : 0.009);
-        j.add(m); j.userData.vis = m;
+    const src = sources[i];
+    if (!src) { glovesCtrl[i].group.visible = glovesHand[i].group.visible = false; continue; }
+    const left = src.handedness === 'left';
+    if (isHand[i]) {
+      glovesCtrl[i].group.visible = false;
+      const joints = hands[i].joints;
+      drawTrackedGlove(glovesHand[i], joints);
+      const it = joints['index-finger-tip'], th = joints['thumb-tip'];
+      if (it && th) {
+        anchors[i].position.copy(it.position).add(th.position).multiplyScalar(0.5);
+        anchors[i].quaternion.copy(it.quaternion);
       }
-    }
-    const it = joints['index-finger-tip'], th = joints['thumb-tip'];
-    if (it && th) {
-      anchors[i].position.copy(it.position).add(th.position).multiplyScalar(0.5);
-      anchors[i].quaternion.copy(it.quaternion);
+    } else {
+      glovesHand[i].group.visible = false;
+      const b = src.gamepad?.buttons || [];
+      const press = Math.max(b[0]?.value || 0, b[1]?.value || 0);
+      const target = held[i] ? 1 : 0.25 + 0.75 * press;   // mão relaxada, fecha ao apertar
+      curls[i] += (target - curls[i]) * Math.min(1, dt * 18);
+      drawControllerGlove(glovesCtrl[i], curls[i], left);
     }
   }
 }
@@ -566,8 +884,8 @@ function updateLocomotion(dt) {
         xrCam.getWorldDirection(_dir); _dir.y = 0; _dir.normalize();
         _right.set(-_dir.z, 0, _dir.x);
         rig.position.addScaledVector(_dir, -y * 1.4 * dt).addScaledVector(_right, x * 1.4 * dt);
-        rig.position.x = THREE.MathUtils.clamp(rig.position.x, -ROOM_LIMIT + .3, ROOM_LIMIT - .3);
-        rig.position.z = THREE.MathUtils.clamp(rig.position.z, -ROOM_LIMIT + .3, ROOM_LIMIT - .3);
+        rig.position.x = THREE.MathUtils.clamp(rig.position.x, LAB.minX + .3, LAB.maxX - .3);
+        rig.position.z = THREE.MathUtils.clamp(rig.position.z, LAB.minZ + .3, LAB.maxZ - .3);
       }
     } else if (src.handedness === 'right') {
       if (Math.abs(x) > 0.7 && !turnLatch) {
@@ -647,9 +965,9 @@ function moveDrag(e) {
   const pt = new THREE.Vector3();
   if (!raycaster.ray.intersectPlane(dragPlane, pt)) return;
   dragging.position.set(
-    THREE.MathUtils.clamp(pt.x + dragOffset.x, -ROOM_LIMIT, ROOM_LIMIT),
+    THREE.MathUtils.clamp(pt.x + dragOffset.x, LAB.minX + 0.05, LAB.maxX - 0.05),
     DRAG_Y + dragBottom,
-    THREE.MathUtils.clamp(pt.z + dragOffset.z, -ROOM_LIMIT, ROOM_LIMIT));
+    THREE.MathUtils.clamp(pt.z + dragOffset.z, LAB.minZ + 0.05, LAB.maxZ - 0.05));
 }
 renderer.domElement.addEventListener('pointermove', e => {
   if (dragging) { moveDrag(e); return; }
@@ -773,7 +1091,7 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-window.game = { items, scene, camera, table }; // acesso para depuração no console
+window.game = { items, scene, camera, table, GloveHand, drawControllerGlove }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
@@ -781,7 +1099,7 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   const time = clock.elapsedTime;
   if (renderer.xr.isPresenting) {
-    updateHands();
+    updateHands(dt);
     updateLocomotion(dt);
     trackHistory(time);
     const next = new Set();
