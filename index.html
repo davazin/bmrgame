@@ -79,7 +79,7 @@
   <div id="msg"></div>
   <details>
     <summary>Controles</summary>
-    <p><b>No Quest:</b> gatilho ou grip pega/solta (com a mão: pinça). Analógico esquerdo anda, direito gira 30°. Botão A/X reinicia, B/Y pula o tutorial. Toque o botão verde da capela com o dedo para ligar; segure a alça prateada para mover o vidro.</p>
+    <p><b>No Quest:</b> gatilho ou grip pega/solta (sem controle: feche a mão para pegar e abra para soltar). Analógico esquerdo anda, direito gira 30°. Botão A/X reinicia, B/Y pula o tutorial. Toque o botão verde da capela com o dedo para ligar; segure a alça prateada para mover o vidro.</p>
     <p><b>No PC:</b> clique e arraste um item para movê-lo; solte para ele cair. A roda do mouse gira o item enquanto arrasta. Clique no botão verde para ligar a capela e arraste a alça do vidro. Arraste o fundo para girar a câmera.</p>
   </details>
 </div>
@@ -694,9 +694,10 @@ for (let i = 0; i < 2; i++) {
   const controller = renderer.xr.getController(i);
   rig.add(controller);
   controller.addEventListener('connected', e => { sources[i] = e.data; isHand[i] = !!e.data.hand; grips[i].visible = !isHand[i]; });
-  controller.addEventListener('disconnected', () => { release(i); sources[i] = null; presses[i] = 0; });
-  const down = () => { presses[i]++; if (!held[i]) grab(i); };
-  const up = () => { presses[i] = Math.max(0, presses[i] - 1); if (presses[i] === 0) release(i); };
+  controller.addEventListener('disconnected', () => { release(i); sources[i] = null; presses[i] = 0; fistClosed[i] = false; });
+  // controles: gatilho/grip. Mãos rastreadas usam o gesto de fechar a mão (ver updateHands)
+  const down = () => { if (isHand[i]) return; presses[i]++; if (!held[i] && sashHeldBy !== i) grab(i); };
+  const up = () => { if (isHand[i]) return; presses[i] = Math.max(0, presses[i] - 1); if (presses[i] === 0) release(i); };
   controller.addEventListener('selectstart', down); controller.addEventListener('selectend', up);
   controller.addEventListener('squeezestart', down); controller.addEventListener('squeezeend', up);
 
@@ -712,6 +713,35 @@ for (let i = 0; i < 2; i++) {
   rig.add(anchor); anchors[i] = anchor;
 }
 
+// ---------- Pegar com a mão fechada (rastreamento de mãos, sem controle) ----------
+const HAND_REACH = 0.08;                 // alcance da mão para pegar (m)
+const FIST_CLOSE = 1.35, FIST_OPEN = 1.6; // histerese: fecha abaixo de 1,35 e abre acima de 1,6
+const fistClosed = [false, false];
+const _w = new THREE.Vector3(), _n = new THREE.Vector3();
+function updateFist(i, joints) {
+  const J = n => joints[n]?.position;
+  const w = J('wrist'), mp = J('middle-finger-phalanx-proximal'), mm = joints['middle-finger-metacarpal'];
+  const tips = ['index-finger-tip', 'middle-finger-tip', 'ring-finger-tip', 'pinky-finger-tip'].map(J);
+  const prox = ['index-finger-phalanx-proximal', 'middle-finger-phalanx-proximal', 'ring-finger-phalanx-proximal'].map(J);
+  if (!w || !mp || !mm || tips.some(t => !t) || prox.some(t => !t)) {
+    if (fistClosed[i]) { fistClosed[i] = false; release(i); }
+    return;
+  }
+  // centro do punho: entre os nós dos dedos, um pouco para dentro da palma
+  anchors[i].position.set(0, 0, 0);
+  for (const p of prox) anchors[i].position.add(p);
+  anchors[i].position.multiplyScalar(1 / prox.length).lerp(w, 0.25);
+  _n.set(0, -1, 0).applyQuaternion(mm.quaternion);          // -Y da articulação = sai da palma
+  anchors[i].position.addScaledVector(_n, 0.025);
+  anchors[i].quaternion.copy(mm.quaternion);
+  // quão fechada está a mão: distância média das pontas dos dedos ao pulso / tamanho da palma
+  const palm = w.distanceTo(mp);
+  let d = 0; for (const t of tips) d += t.distanceTo(w);
+  const ratio = d / tips.length / Math.max(palm, 0.04);
+  if (!fistClosed[i] && ratio < FIST_CLOSE) { fistClosed[i] = true; grab(i); }
+  else if (fistClosed[i] && ratio > FIST_OPEN) { fistClosed[i] = false; release(i); }
+}
+
 function updateHands(dt) {
   for (let i = 0; i < 2; i++) {
     const src = sources[i];
@@ -721,11 +751,7 @@ function updateHands(dt) {
       glovesCtrl[i].group.visible = false;
       const joints = hands[i].joints;
       drawTrackedGlove(glovesHand[i], joints);
-      const it = joints['index-finger-tip'], th = joints['thumb-tip'];
-      if (it && th) {
-        anchors[i].position.copy(it.position).add(th.position).multiplyScalar(0.5);
-        anchors[i].quaternion.copy(it.quaternion);
-      }
+      updateFist(i, joints);
     } else {
       glovesHand[i].group.visible = false;
       const b = src.gamepad?.buttons || [];
@@ -750,7 +776,7 @@ function nearestItem(point, maxDist, ignore = null) {
 }
 function grab(i) {
   const a = anchorFor(i); a.getWorldPosition(_p);
-  const item = nearestItem(_p, isHand[i] ? 0.05 : 0.07);
+  const item = nearestItem(_p, isHand[i] ? HAND_REACH : 0.07);
   // alça do vidro tem prioridade se estiver mais perto que o instrumento
   const hd = handleDistance(_p);
   if (hd < 0.07) {
@@ -1344,10 +1370,10 @@ const TUT = [
   { id: 'move', vr: 'Analógico esquerdo: andar\nAnalógico direito: girar', hand: 'Olhe em volta: você pode\ncaminhar pelo espaço real.',
     pc: 'Arraste o fundo com o mouse para girar\ne use a roda para aproximar.', ev: 'move', auto: 7 },
   { id: 'power', vr: 'Ligue a capela: toque com o dedo\nno botão verde ao lado do logo.', pc: 'Clique no botão verde ao lado\ndo logo para ligar a capela.', ev: 'power' },
-  { id: 'grab', vr: 'Pegue um instrumento na mesa de inox:\naproxime a mão e aperte o gatilho.', hand: 'Pegue um instrumento na mesa de inox:\nfaça uma pinça com os dedos.',
+  { id: 'grab', vr: 'Pegue um instrumento na mesa de inox:\naproxime a mão e aperte o gatilho.', hand: 'Pegue um instrumento na mesa de inox:\nfeche a mão sobre ele.',
     pc: 'Clique e arraste um instrumento\nda mesa de inox.', ev: 'grab' },
   { id: 'place', all: 'Leve o instrumento para dentro\nda capela e solte sobre a bancada.', ev: 'place' },
-  { id: 'sash', vr: 'Segure a alça prateada do vidro\ne mova a mão para subir ou descer.', hand: 'Faça a pinça na alça prateada\ndo vidro e mova a mão.',
+  { id: 'sash', vr: 'Segure a alça prateada do vidro\ne mova a mão para subir ou descer.', hand: 'Feche a mão na alça prateada\ndo vidro e mova a mão.',
     pc: 'Arraste a alça prateada do vidro\npara cima ou para baixo.', ev: 'sash', auto: 12 },
   { id: 'end', all: 'Pronto! Agora coloque todos\nos instrumentos na capela.', auto: 4 },
 ];
@@ -1482,7 +1508,7 @@ renderer.setAnimationLoop(() => {
     for (let i = 0; i < 2; i++) {
       if (held[i] || !sources[i]) continue;
       anchorFor(i).getWorldPosition(_p);
-      const it = nearestItem(_p, isHand[i] ? 0.05 : 0.07);
+      const it = nearestItem(_p, isHand[i] ? HAND_REACH : 0.07);
       if (it) next.add(it);
     }
     applyHighlights(next);
