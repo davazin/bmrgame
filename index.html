@@ -54,7 +54,8 @@
 <script type="importmap">
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
 } }
 </script>
 </head>
@@ -86,6 +87,7 @@
 
 <script type="module">
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
@@ -482,70 +484,122 @@ function nextBenchPos() {
 
 // Itens: instrumentos BMR (carregados mais abaixo, depois do leitor de .glb)
 
-// ---------- Física simples ----------
+// ---------- Física real (motor cannon-es) ----------
+// Os itens são corpos rígidos: caem, tombam, rolam e batem nas mesas, na capela e no vidro.
 const _box = new THREE.Box3(), _box2 = new THREE.Box3(), _c = new THREE.Vector3();
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -GRAVITY, 0) });
+world.broadphase = new CANNON.SAPBroadphase(world);
+world.allowSleep = true;
+world.solver.iterations = 14;
+const matItem = new CANNON.Material('item'), matStatic = new CANNON.Material('estatico');
+world.addContactMaterial(new CANNON.ContactMaterial(matItem, matStatic, { friction: 0.6, restitution: 0.02 }));
+world.addContactMaterial(new CANNON.ContactMaterial(matItem, matItem, { friction: 0.5, restitution: 0.02 }));
+function staticBox(x0, y0, z0, x1, y1, z1, type = CANNON.Body.STATIC) {
+  const b = new CANNON.Body({ mass: 0, type, material: matStatic,
+    shape: new CANNON.Box(new CANNON.Vec3((x1 - x0) / 2, (y1 - y0) / 2, (z1 - z0) / 2)) });
+  b.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  world.addBody(b);
+  return b;
+}
+let sashBody = null;
+// monta o cenário físico a partir das superfícies e colisores já definidos (chamado depois de tudo criado)
+function buildStaticPhysics() {
+  const floor = new CANNON.Body({ mass: 0, material: matStatic, shape: new CANNON.Plane() });
+  floor.quaternion.setFromEuler(-Math.PI / 2, 0, 0); world.addBody(floor);
+  const T = 0.2;
+  staticBox(LAB.minX - T, 0, LAB.minZ - T, LAB.maxX + T, LAB.H, LAB.minZ);
+  staticBox(LAB.minX - T, 0, LAB.maxZ, LAB.maxX + T, LAB.H, LAB.maxZ + T);
+  staticBox(LAB.minX - T, 0, LAB.minZ, LAB.minX, LAB.H, LAB.maxZ);
+  staticBox(LAB.maxX, 0, LAB.minZ, LAB.maxX + T, LAB.H, LAB.maxZ);
+  for (const s of surfaces) staticBox(s.minX, s.top - 0.04, s.minZ, s.maxX, s.top, s.maxZ);
+  for (const c of colliders) {
+    if (c === sashCollider) continue;
+    staticBox(c.min.x, c.min.y, c.min.z, c.max.x, c.max.y, c.max.z);
+  }
+  staticBox(-0.75, 1.55, CZ - 0.10, 0.75, 2.087, CZ);             // painel acima do vidro
+  // vidro frontal móvel: corpo cinemático que acompanha o vidro
+  sashBody = staticBox(-0.75, 0, CZ - 0.10, 0.75, 0.6, CZ, CANNON.Body.KINEMATIC);
+}
+function updateSashBody() {
+  if (sashBody) sashBody.position.y = SASH_BASE + (typeof sashOffset === 'number' ? sashOffset : 0) + 0.3;
+}
 
-function supportsFor(item) {
-  const list = [{ minX: -99, maxX: 99, minZ: -99, maxZ: 99, top: 0 }, ...surfaces];
-  for (const other of items) {                        // empilhar sobre outros itens parados
-    if (other === item || !other.userData.resting) continue;
-    _box2.setFromObject(other);
-    list.push({ minX: _box2.min.x, maxX: _box2.max.x, minZ: _box2.min.z, maxZ: _box2.max.z, top: _box2.max.y });
+// corpo de um item: formas definidas no item (userData.shapes) ou caixa do tamanho do modelo
+const _q3 = new THREE.Quaternion(), _v3 = new THREE.Vector3();
+function makeItemBody(item) {
+  const u = item.userData;
+  let shapes = u.shapes, com = u.com;
+  if (!shapes) {
+    const b = new THREE.Box3().setFromObject(item.children[0]);
+    item.worldToLocal(b.min); item.worldToLocal(b.max);
+    const size = b.getSize(new THREE.Vector3()), ctr = b.getCenter(new THREE.Vector3());
+    shapes = [{ type: 'box', half: size.multiplyScalar(0.5).toArray(), pos: ctr.toArray() }];
+    com = ctr;
   }
-  return list;
+  const body = new CANNON.Body({ mass: u.mass || 0.05, material: matItem, linearDamping: 0.08, angularDamping: 0.35,
+    sleepSpeedLimit: 0.04, sleepTimeLimit: 0.4 });
+  for (const s of shapes) {
+    const off = new CANNON.Vec3(s.pos[0] - com.x, s.pos[1] - com.y, s.pos[2] - com.z);
+    if (s.type === 'cyl') {
+      const q = new CANNON.Quaternion();
+      if (s.axis === 'x') q.setFromEuler(0, 0, Math.PI / 2);
+      body.addShape(new CANNON.Cylinder(s.r, s.r, s.h, 20), off, q);
+    } else body.addShape(new CANNON.Box(new CANNON.Vec3(...s.half)), off);
+  }
+  u.com = com.clone ? com.clone() : new THREE.Vector3(com.x, com.y, com.z);
+  u.body = body; body.userData = { item };
+  syncBodyFromItem(item);
+  body.addEventListener('collide', e => {
+    const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
+    const now = performance.now();
+    if (v > 0.35 && now - (u.lastHit || 0) > 90) { u.lastHit = now; impactSound(item, v); }
+  });
+  world.addBody(body);
+  body.sleep();                       // começa parado na mesa até alguém mexer
 }
+function syncBodyFromItem(item) {
+  const u = item.userData, b = u.body;
+  item.getWorldQuaternion(_q3); item.getWorldPosition(_v3);
+  _v3.add(u.com.clone().applyQuaternion(_q3));
+  b.position.set(_v3.x, _v3.y, _v3.z);
+  b.quaternion.set(_q3.x, _q3.y, _q3.z, _q3.w);
+}
+function syncItemFromBody(item) {
+  const u = item.userData, b = u.body;
+  item.quaternion.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+  item.position.set(b.position.x, b.position.y, b.position.z).sub(_v3.copy(u.com).applyQuaternion(item.quaternion));
+}
+function setHeldPhysics(item, heldNow) {
+  const b = item.userData.body; if (!b) return;
+  b.type = heldNow ? CANNON.Body.KINEMATIC : CANNON.Body.DYNAMIC;
+  b.velocity.setZero(); b.angularVelocity.setZero();
+  b.wakeUp();
+}
+const _prevP = new Map();
 function stepPhysics(dt) {
-  for (const item of items) {
-    const u = item.userData;
-    if (u.heldBy !== null || u.resting) continue;
-    _box.setFromObject(item);
-    const bottomBefore = _box.min.y;
-    u.vel.y -= GRAVITY * dt;
-    u.vel.multiplyScalar(1 - 0.2 * dt); // arrasto do ar
-    item.position.addScaledVector(u.vel, dt);
-    // paredes
-    for (const k of ['x', 'z']) {
-      const lo = (k === 'x' ? LAB.minX : LAB.minZ) + 0.05, hi = (k === 'x' ? LAB.maxX : LAB.maxZ) - 0.05;
-      if (item.position[k] < lo || item.position[k] > hi) { item.position[k] = THREE.MathUtils.clamp(item.position[k], lo, hi); u.vel[k] *= -0.3; }
-    }
-    _box.setFromObject(item);
-    _box.getCenter(_c);
-    let support = 0;
-    for (const s of supportsFor(item)) {
-      if (_c.x >= s.minX && _c.x <= s.maxX && _c.z >= s.minZ && _c.z <= s.maxZ && s.top <= bottomBefore + 0.002 && s.top > support) support = s.top;
-    }
-    if (_box.min.y < support) {
-      if (-u.vel.y > 0.5) impactSound(item, -u.vel.y);
-      item.position.y += support - _box.min.y;
-      if (u.vel.y < -1.2) { u.vel.y *= -0.25; u.vel.x *= 0.6; u.vel.z *= 0.6; }
-      else { u.vel.set(0, 0, 0); u.resting = true; }
-    }
-    resolveColliders(item);
+  updateSashBody();
+  // itens segurados (mão, controle ou mouse) empurram os outros: corpo cinemático seguindo a mão
+  for (const it of items) {
+    const u = it.userData; if (!u.body || u.heldBy === null) continue;
+    const prev = u.body.position.clone();
+    syncBodyFromItem(it);
+    if (dt > 0) u.body.velocity.set((u.body.position.x - prev.x) / dt, (u.body.position.y - prev.y) / dt, (u.body.position.z - prev.z) / dt);
+  }
+  world.step(1 / 90, dt, 6);
+  for (const it of items) {
+    const u = it.userData; if (!u.body || u.heldBy !== null) continue;
+    syncItemFromBody(it);
+    if (u.body.position.y < -1) resetOne(it);   // segurança: nunca some do mapa
   }
 }
-function resolveColliders(item) {
-  for (let pass = 0; pass < 2; pass++) {
-    _box.setFromObject(item);
-    let hit = false;
-    for (const c of colliders) {
-      if (!_box.intersectsBox(c)) continue;
-      hit = true;
-      let best = null;
-      for (const k of ['x', 'y', 'z']) {
-        const neg = _box.max[k] - c.min[k], pos = c.max[k] - _box.min[k];
-        const d = neg < pos ? -neg : pos;
-        if (!best || Math.abs(d) < Math.abs(best.d)) best = { k, d };
-      }
-      item.position[best.k] += best.d;
-      _box.translate(new THREE.Vector3(best.k === 'x' ? best.d : 0, best.k === 'y' ? best.d : 0, best.k === 'z' ? best.d : 0));
-      const u = item.userData;
-      if (best.k === 'y' && best.d > 0) { u.vel.set(0, 0, 0); u.resting = true; }
-      else u.vel[best.k] *= -0.2;
-    }
-    if (!hit) break;
-  }
+function wakeAll() { for (const it of items) it.userData.body?.wakeUp(); }
+function resetOne(it) {
+  const u = it.userData;
+  it.position.copy(u.home.p); it.quaternion.copy(u.home.q);
+  if (u.body) { u.body.type = CANNON.Body.DYNAMIC; u.body.velocity.setZero(); u.body.angularVelocity.setZero(); syncBodyFromItem(it); u.body.sleep(); }
 }
-function wakeAll() { for (const it of items) if (it.userData.heldBy === null) it.userData.resting = false; }
+// tombado = eixo vertical do item inclinado mais de 30°
+function isTipped(item) { return _v3.set(0, 1, 0).applyQuaternion(item.quaternion).y < 0.87; }   // > 30° = tombado
 
 function onTable(item) {
   if (item.userData.heldBy !== null) return false;
@@ -574,8 +628,7 @@ function resetItems() {
     const u = it.userData;
     if (u.heldBy !== null) { held[u.heldBy] = null; u.heldBy = null; }
     scene.attach(it);
-    it.position.copy(u.home.p); it.quaternion.copy(u.home.q);
-    u.vel.set(0, 0, 0); u.resting = false;
+    resetOne(it);
   }
   if (dragging) { dragging = null; controls.enabled = true; }
 }
@@ -602,12 +655,26 @@ const _qa = new THREE.Quaternion();
 class GloveHand {
   constructor(parent) {
     this.group = new THREE.Group(); this.group.visible = false; parent.add(this.group);
-    this.spheres = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 14, 10), gloveMat, 32);
-    this.cyls = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 14, 1, false), gloveMat, 32);
-    this.palm = new THREE.Mesh(new RoundedBoxGeometry(0.082, 0.03, 0.092, 4, 0.0145), gloveMat);
+    this.mat = gloveMat.clone();           // material próprio: cada luva acende sozinha
+    this.spheres = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 14, 10), this.mat, 32);
+    this.cyls = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 14, 1, false), this.mat, 32);
+    this.palm = new THREE.Mesh(new RoundedBoxGeometry(0.082, 0.03, 0.092, 4, 0.0145), this.mat);
     for (const m of [this.spheres, this.cyls, this.palm]) { m.castShadow = true; m.frustumCulled = false; this.group.add(m); }
   }
   begin() { this.ns = 0; this.nc = 0; }
+  // retorno visual: 'livre' | 'perto' (algo ao alcance; brilha mais quanto mais a mão fecha) | 'segurando' (verde)
+  feedback(state, closeness, flash, dt) {
+    const target = new THREE.Color(), base = new THREE.Color(0x5b8fe3);
+    let glow = 0, col = base;
+    if (state === 'perto') { target.setHex(0x55d6ff); glow = 0.25 + 0.75 * closeness; }
+    else if (state === 'segurando') { target.setHex(0x3fe08a); glow = 0.45; }
+    glow += flash * 0.9;
+    const k = Math.min(1, dt * 14);
+    this.glow = (this.glow ?? 0) + (glow - (this.glow ?? 0)) * k;
+    if (state !== 'livre') this.mat.emissive.lerp(target, k);
+    this.mat.emissiveIntensity = this.glow;
+    this.mat.color.lerp(state === 'segurando' ? new THREE.Color(0x6fb0e8) : base, k);
+  }
   sphere(p, r) { _m4.compose(p, _qa.identity(), _s.setScalar(r)); this.spheres.setMatrixAt(this.ns++, _m4); }
   bone(p, q, r) {
     _d.subVectors(q, p); const len = _d.length(); if (len < 1e-5) return;
@@ -716,7 +783,7 @@ for (let i = 0; i < 2; i++) {
 // ---------- Pegar com a mão fechada (rastreamento de mãos, sem controle) ----------
 const HAND_REACH = 0.08;                 // alcance da mão para pegar (m)
 const FIST_CLOSE = 1.35, FIST_OPEN = 1.6; // histerese: fecha abaixo de 1,35 e abre acima de 1,6
-const fistClosed = [false, false];
+const fistClosed = [false, false], fistRatio = [2, 2], gloveFlash = [0, 0];
 const _w = new THREE.Vector3(), _n = new THREE.Vector3();
 function updateFist(i, joints) {
   const J = n => joints[n]?.position;
@@ -738,6 +805,7 @@ function updateFist(i, joints) {
   const palm = w.distanceTo(mp);
   let d = 0; for (const t of tips) d += t.distanceTo(w);
   const ratio = d / tips.length / Math.max(palm, 0.04);
+  fistRatio[i] = ratio;
   if (!fistClosed[i] && ratio < FIST_CLOSE) { fistClosed[i] = true; grab(i); }
   else if (fistClosed[i] && ratio > FIST_OPEN) { fistClosed[i] = false; release(i); }
 }
@@ -791,7 +859,8 @@ function grab(i) {
   if (u.heldBy !== null) held[u.heldBy] = null;   // passar de uma mão pra outra
   a.attach(item);
   if (isHand[i] && u.grip) snapToPalm(item, sources[i]?.handedness === 'left');
-  u.heldBy = i; u.resting = false; u.vel.set(0, 0, 0);
+  u.heldBy = i; setHeldPhysics(item, true);
+  gloveFlash[i] = 1;                       // luva pisca verde: confirma que pegou
   held[i] = item; history[i].length = 0;
   wakeAll();
   pulse(i, 0.5, 40);
@@ -821,12 +890,21 @@ function release(i) {
   if (sashHeldBy === i) { sashHeldBy = null; pulse(i, 0.2, 20); }
   const item = held[i]; if (!item) return;
   scene.attach(item);
-  const u = item.userData; u.heldBy = null; u.resting = false;
+  const u = item.userData; u.heldBy = null;
+  setHeldPhysics(item, false);
+  syncBodyFromItem(item);
+  // velocidade de arremesso (linear e de giro) a partir dos últimos quadros da mão
   const h = history[i];
-  if (h.length >= 2) {
+  if (h.length >= 2 && u.body) {
     const a = h[0], b = h[h.length - 1], dt = Math.max(1e-3, b.t - a.t);
-    u.vel.subVectors(b.p, a.p).divideScalar(dt);
-    if (u.vel.length() > 8) u.vel.setLength(8);
+    const v = new THREE.Vector3().subVectors(b.p, a.p).divideScalar(dt);
+    if (v.length() > 8) v.setLength(8);
+    u.body.velocity.set(v.x, v.y, v.z);
+    const dq = b.q.clone().multiply(a.q.clone().invert());
+    if (dq.w < 0) { dq.x *= -1; dq.y *= -1; dq.z *= -1; dq.w *= -1; }
+    const ang = 2 * Math.acos(Math.min(1, dq.w)), sn = Math.sqrt(Math.max(1e-9, 1 - dq.w * dq.w));
+    const w = new THREE.Vector3(dq.x / sn, dq.y / sn, dq.z / sn).multiplyScalar(Math.min(ang / dt, 20));
+    if (ang > 1e-3) u.body.angularVelocity.set(w.x, w.y, w.z);
   }
   held[i] = null;
   wakeAll();
@@ -838,8 +916,9 @@ function pulse(i, strength, ms) {
 function trackHistory(time) {
   for (let i = 0; i < 2; i++) {
     if (!held[i]) continue;
-    const p = new THREE.Vector3(); anchorFor(i).getWorldPosition(p);
-    history[i].push({ p, t: time }); if (history[i].length > 6) history[i].shift();
+    const p = new THREE.Vector3(); held[i].getWorldPosition(p);
+    const q = new THREE.Quaternion(); held[i].getWorldQuaternion(q);
+    history[i].push({ p, q, t: time }); if (history[i].length > 6) history[i].shift();
   }
 }
 
@@ -935,7 +1014,8 @@ renderer.domElement.addEventListener('pointerdown', e => {
   if (!hit) return;
   const item = itemOf(hit.object); if (!item || item.userData.heldBy !== null) return;
   controls.enabled = false;
-  dragging = item; item.userData.heldBy = 'mouse'; item.userData.resting = false;
+  dragging = item; item.userData.heldBy = 'mouse'; setHeldPhysics(item, true);
+  item.quaternion.set(0, item.quaternion.y, 0, item.quaternion.w).normalize();   // levanta em pé ao arrastar
   tutEvent('grab'); SFX.pegar(item.getWorldPosition(new THREE.Vector3()));
   _box.setFromObject(item); dragBottom = item.position.y - _box.min.y;
   const pt = new THREE.Vector3(); raycaster.ray.intersectPlane(dragPlane, pt);
@@ -964,7 +1044,15 @@ renderer.domElement.addEventListener('pointermove', e => {
 });
 renderer.domElement.addEventListener('pointerup', () => {
   if (!dragging) return;
-  dragging.userData.heldBy = null; dragging.userData.resting = false; dragging.userData.vel.set(0, 0, 0);
+  // no PC, ao soltar, o item desce até encostar na superfície embaixo dele (como pousar com a mão)
+  _box.setFromObject(dragging); _box.getCenter(_c);
+  let ground = 0;                                   // topo mais alto embaixo do item: mesas, bancada, outros itens
+  const under = (x0, x1, z0, z1, top) => { if (_c.x > x0 && _c.x < x1 && _c.z > z0 && _c.z < z1 && top <= _box.min.y + 0.002 && top > ground) ground = top; };
+  for (const sf of surfaces) under(sf.minX, sf.maxX, sf.minZ, sf.maxZ, sf.top);
+  for (const cb of colliders) if (cb !== sashCollider) under(cb.min.x, cb.max.x, cb.min.z, cb.max.z, cb.max.y);
+  for (const it of items) if (it !== dragging) { _box2.setFromObject(it); under(_box2.min.x, _box2.max.x, _box2.min.z, _box2.max.z, _box2.max.y); }
+  dragging.position.y -= Math.max(0, _box.min.y - ground - 0.003);
+  dragging.userData.heldBy = null; setHeldPhysics(dragging, false); syncBodyFromItem(dragging);
   dragging = null; controls.enabled = true; wakeAll();
 });
 renderer.domElement.addEventListener('wheel', e => {
@@ -1113,6 +1201,16 @@ function buildVialAdapter() {
     const pos = nextBenchPos(); pos.y = 0.752;
     const item = registerItem(buildVialAdapter(), 'Frasco com adaptador', pos);
     item.userData.kind = 'vidro';
+    // formas de colisão (origem no fundo do frasco) e centro de massa alto: a câmara pesa em cima
+    item.userData.mass = 0.04;
+    item.userData.com = new THREE.Vector3(0.004, 0.036, 0);   // vidro + líquido embaixo, câmara em cima
+    item.userData.shapes = [
+      { type: 'cyl', r: 0.0100, h: 0.0545, pos: [0, 0.02725, 0] },
+      { type: 'cyl', r: 0.0130, h: 0.0260, pos: [0, 0.0610, 0] },
+      { type: 'cyl', r: 0.0050, h: 0.0260, pos: [0, 0.0870, 0] },
+      { type: 'cyl', r: 0.0235, h: 0.0400, pos: [0.031, 0.072, 0], axis: 'x' },
+    ];
+    makeItemBody(item);
     item.userData.grip = new THREE.Vector3(0, 0.024, 0);   // centro do corpo do frasco
     item.userData.gripMode = 'vertical';
   }
@@ -1158,7 +1256,9 @@ document.getElementById('itemFile').addEventListener('change', async e => {
       const center = new THREE.Box3().setFromObject(obj).getCenter(new THREE.Vector3());
       obj.position.sub(center);
       const name = file.name.replace(/\.(glb|gltf)$/i, '');
-      registerItem(obj, name, nextBenchPos()).userData.home.p.y = 1.0;
+      const gi = registerItem(obj, name, nextBenchPos());
+      gi.userData.home.p.y = 1.0;
+      makeItemBody(gi); gi.userData.body.wakeUp();
       const tris = triCount(obj);
       msg.textContent = `Item "${name}": ${tris.toLocaleString('pt-BR')} triângulos${mm ? ' (convertido de mm para m)' : ''}.` +
         (tris > 50000 ? ' Atenção: peça pesada; use Decimate no Blender.' : '');
@@ -1646,7 +1746,9 @@ function updateResetButton(dt) {
   resetMat.emissiveIntensity = resetPress * 1.5;
 }
 
-window.game = { pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+buildStaticPhysics();
+
+window.game = { CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
@@ -1659,10 +1761,22 @@ renderer.setAnimationLoop(() => {
     trackHistory(time);
     const next = new Set();
     for (let i = 0; i < 2; i++) {
-      if (held[i] || !sources[i]) continue;
+      if (!sources[i]) continue;
+      const glove = isHand[i] ? glovesHand[i] : glovesCtrl[i];
+      gloveFlash[i] = Math.max(0, gloveFlash[i] - dt * 3);
+      if (held[i] || sashHeldBy === i) { glove.feedback('segurando', 1, gloveFlash[i], dt); continue; }
       anchorFor(i).getWorldPosition(_p);
       const it = nearestItem(_p, isHand[i] ? HAND_REACH : 0.07);
       if (it) next.add(it);
+      // algo ao alcance: item, alça do vidro ou botões
+      const near = !!it || handleDistance(_p) < 0.07 ||
+        (powerBtn && _p.distanceTo(powerBtn.getWorldPosition(_btn)) < 0.06) ||
+        (resetBtn && _p.distanceTo(resetBtn.getWorldPosition(_btn)) < 0.07);
+      // quanto a mão já fechou (0 = aberta, 1 = no ponto de pegar)
+      const closeness = isHand[i]
+        ? THREE.MathUtils.clamp((FIST_OPEN + 0.35 - fistRatio[i]) / (FIST_OPEN + 0.35 - FIST_CLOSE), 0, 1)
+        : THREE.MathUtils.clamp((curls[i] - 0.25) / 0.75, 0, 1);
+      glove.feedback(near ? 'perto' : 'livre', closeness, gloveFlash[i], dt);
     }
     applyHighlights(next);
   }
