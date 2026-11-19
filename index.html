@@ -893,7 +893,9 @@ function holdItem(i, item) {
   if (typeof u.heldBy === 'number') held[u.heldBy] = null;   // passar de uma mão pra outra
   if (dragging === item) { dragging = null; controls.enabled = true; }
   a.attach(item);
-  if (isHand[i] && u.grip) snapToPalm(item, sources[i]?.handedness === 'left');
+  const left = sources[i]?.handedness === 'left';
+  if (u.gripMode === 'frasco') holdVialPose(item, left, !isHand[i]);   // frasco: pega real, com o topo para fora da mão
+  else if (isHand[i] && u.grip) snapToPalm(item, left);
   u.heldBy = i; setHeldPhysics(item, true);
   gloveFlash[i] = 1;                       // luva pisca verde: confirma que pegou
   held[i] = item; history[i].length = 0;
@@ -919,6 +921,28 @@ function snapToPalm(item, left) {
   item.quaternion.copy(_gq);
   _gv.copy(g).applyQuaternion(_gq);
   item.position.copy(_gv).multiplyScalar(-1);   // centro do cabo no centro da mão fechada
+}
+
+// Pega real do frasco: corpo envolvido pelos dedos e polegar, com o gargalo e o lacre para fora,
+// acima do anel polegar–indicador (assim dá para ver e encaixar o OncoSafe por cima).
+// O frasco fica em pé quando a mão está "de polegar para cima"; a câmara do OncoSafe aponta para a frente (dedos).
+const VIAL_GRIP_Y = 0.02;          // altura do frasco que fica no centro da mão (2 cm do fundo)
+const VIAL_OUT = 0.026;            // quanto o frasco sobe em direção ao polegar
+function holdVialPose(item, left, controller) {
+  const thumb = new THREE.Vector3(), fingers = new THREE.Vector3(), palm = new THREE.Vector3();
+  if (controller) {                 // espaço do grip do controle: -Z polegar, -Y dedos, palma em -X (dir.) / +X (esq.)
+    thumb.set(0, 0, -1); fingers.set(0, -1, 0); palm.set(left ? 1 : -1, 0, 0);
+  } else {                          // articulação da mão: -Z dedos, -Y palma, polegar em -X (dir.) / +X (esq.)
+    thumb.set(left ? 1 : -1, 0, 0); fingers.set(0, 0, -1); palm.set(0, -1, 0);
+  }
+  // eixos do frasco: +Y → polegar, +X (câmara) → dedos, Z = X × Y
+  const z = new THREE.Vector3().crossVectors(fingers, thumb);
+  _gm.makeBasis(fingers, thumb, z);
+  item.quaternion.setFromRotationMatrix(_gm);
+  item.position.copy(new THREE.Vector3(0, VIAL_GRIP_Y, 0).applyQuaternion(item.quaternion)).multiplyScalar(-1)
+    .addScaledVector(thumb, VIAL_OUT)          // gargalo para fora do punho
+    .addScaledVector(palm, controller ? 0 : 0.008)
+    .addScaledVector(fingers, controller ? 0.004 : 0.01);   // apoiado nas pontas dos dedos, não no meio da palma
 }
 
 function release(i) {
@@ -1906,7 +1930,7 @@ const YAXIS = new THREE.Vector3(0, 1, 0);
 
 function spawnProcedure() {
   const vial = registerItem(buildVial(), 'Frasco-ampola 10 mL', new THREE.Vector3(0.70, 0.75, -0.22));
-  Object.assign(vial.userData, { kind: 'vidro', grip: new THREE.Vector3(0, 0.024, 0), gripMode: 'vertical' });
+  Object.assign(vial.userData, { kind: 'vidro', grip: new THREE.Vector3(0, VIAL_GRIP_Y, 0), gripMode: 'frasco' });
   applyShapes(vial, shapesFor('vial')); makeItemBody(vial);
 
   const ad = registerItem(buildAdapter(), 'OncoSafe', new THREE.Vector3(0.70, 0.75 + 0.0135, 0.0));
@@ -2311,7 +2335,7 @@ spawnProcedure();
 
 buildStaticPhysics();
 
-window.game = { adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, connectSyringe, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, connectSyringe, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
