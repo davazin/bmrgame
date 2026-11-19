@@ -745,7 +745,7 @@ function drawControllerGlove(glove, curl, left) {
 
 // ---------- VR: controles e mãos ----------
 const held = [null, null], presses = [0, 0], isHand = [false, false], sources = [null, null];
-const grips = [], hands = [], anchors = [], history = [[], []];
+const grips = [], hands = [], anchors = [], pinchAnchors = [], history = [[], []];
 const glovesCtrl = [], glovesHand = [], curls = [0.25, 0.25];
 const _p = new THREE.Vector3();
 
@@ -753,7 +753,7 @@ for (let i = 0; i < 2; i++) {
   const controller = renderer.xr.getController(i);
   rig.add(controller);
   controller.addEventListener('connected', e => { sources[i] = e.data; isHand[i] = !!e.data.hand; grips[i].visible = !isHand[i]; });
-  controller.addEventListener('disconnected', () => { release(i); sources[i] = null; presses[i] = 0; fistClosed[i] = false; });
+  controller.addEventListener('disconnected', () => { release(i); sources[i] = null; presses[i] = 0; fistClosed[i] = false; grabMode[i] = null; });
   // controles: gatilho/grip. Mãos rastreadas usam o gesto de fechar a mão (ver updateHands)
   const down = () => { if (isHand[i]) return; presses[i]++; if (!held[i] && sashHeldBy !== i) grab(i); };
   const up = () => { if (isHand[i]) return; presses[i] = Math.max(0, presses[i] - 1); if (presses[i] === 0) release(i); };
@@ -770,12 +770,16 @@ for (let i = 0; i < 2; i++) {
 
   const anchor = new THREE.Object3D();
   rig.add(anchor); anchors[i] = anchor;
+  const pa = new THREE.Object3D(); rig.add(pa); pinchAnchors[i] = pa;
 }
 
 // ---------- Pegar com a mão fechada (rastreamento de mãos, sem controle) ----------
 const HAND_REACH = 0.08;                 // alcance da mão para pegar (m)
 const FIST_CLOSE = 1.35, FIST_OPEN = 1.6; // histerese: fecha abaixo de 1,35 e abre acima de 1,6
 const fistClosed = [false, false], fistRatio = [2, 2], gloveFlash = [0, 0];
+// gesto que segurou o item: 'fist' (mão fechada) ou 'pinch' (pinça: seringa e êmbolo, como na vida real)
+const grabMode = [null, null], pinchDist = [1, 1];
+const PINCH_CLOSE = 0.022, PINCH_OPEN = 0.045;
 const _w = new THREE.Vector3(), _n = new THREE.Vector3();
 function updateFist(i, joints) {
   const J = n => joints[n]?.position;
@@ -783,8 +787,16 @@ function updateFist(i, joints) {
   const tips = ['index-finger-tip', 'middle-finger-tip', 'ring-finger-tip', 'pinky-finger-tip'].map(J);
   const prox = ['index-finger-phalanx-proximal', 'middle-finger-phalanx-proximal', 'ring-finger-phalanx-proximal'].map(J);
   if (!w || !mp || !mm || tips.some(t => !t) || prox.some(t => !t)) {
-    if (fistClosed[i]) { fistClosed[i] = false; release(i); }
+    if (grabMode[i]) { grabMode[i] = null; release(i); }
+    fistClosed[i] = false;
     return;
+  }
+  // ponto da pinça (entre a ponta do polegar e a do indicador)
+  const th = J('thumb-tip'), it = J('index-finger-tip'), ip = joints['index-finger-phalanx-proximal'];
+  if (th && it && ip) {
+    pinchAnchors[i].position.copy(th).add(it).multiplyScalar(0.5);
+    pinchAnchors[i].quaternion.copy(ip.quaternion);
+    pinchDist[i] = th.distanceTo(it);
   }
   // centro do punho: entre os nós dos dedos, um pouco para dentro da palma
   anchors[i].position.set(0, 0, 0);
@@ -798,8 +810,33 @@ function updateFist(i, joints) {
   let d = 0; for (const t of tips) d += t.distanceTo(w);
   const ratio = d / tips.length / Math.max(palm, 0.04);
   fistRatio[i] = ratio;
-  if (!fistClosed[i] && ratio < FIST_CLOSE) { fistClosed[i] = true; grab(i); }
-  else if (fistClosed[i] && ratio > FIST_OPEN) { fistClosed[i] = false; release(i); }
+  const pinched = pinchDist[i] < PINCH_CLOSE;
+  if (!grabMode[i]) {
+    if (ratio < FIST_CLOSE) { grabMode[i] = 'fist'; fistClosed[i] = true; grab(i); }
+    else if (pinched && !pinchLatch[i]) { pinchLatch[i] = true; grabMode[i] = 'pinch'; if (!pinchGrab(i)) grabMode[i] = null; }
+  } else if (grabMode[i] === 'fist' && ratio > FIST_OPEN) { grabMode[i] = null; fistClosed[i] = false; release(i); }
+  else if (grabMode[i] === 'pinch' && pinchDist[i] > PINCH_OPEN && ratio > FIST_CLOSE) { grabMode[i] = null; release(i); }
+  if (pinchDist[i] > PINCH_OPEN) pinchLatch[i] = false;
+}
+const pinchLatch = [false, false];
+// pinça: só para a seringa (segurar como caneta), o êmbolo e girar a seringa conectada
+function pinchGrab(i) {
+  const p = pinchAnchors[i].getWorldPosition(new THREE.Vector3());
+  if (procGrab(i, p)) return true;
+  const s = P.syringe;
+  if (s && !P.syringeOn && items.includes(s) && _box.setFromObject(s).distanceToPoint(p) < 0.035) { holdItem(i, s); return true; }
+  return false;
+}
+// seringa na pinça: o corpo passa entre o polegar e o indicador e deita ao longo do indicador, bico para a frente
+const _pt = new THREE.Vector3(), _pi = new THREE.Vector3(), _pp = new THREE.Vector3(), _pA = new THREE.Vector3(), _pq = new THREE.Quaternion();
+function penPose(i) {
+  const j = hands[i].joints, th = j['thumb-tip'], it = j['index-finger-tip'], ip = j['index-finger-phalanx-proximal'];
+  if (!th || !it || !ip) return;
+  rig.localToWorld(_pt.copy(th.position)); rig.localToWorld(_pi.copy(it.position)); rig.localToWorld(_pp.copy(ip.position));
+  const g = _pt.add(_pi).multiplyScalar(0.5);                 // ponto de pega
+  _pA.subVectors(_pp, _pi).normalize();                       // da ponta do indicador para a mão = lado do êmbolo
+  _pq.setFromUnitVectors(_UP, _pA);
+  setWorldPose(P.syringe, g.addScaledVector(_pA, -0.028), _pq);   // segura a ~2,8 cm do bico
 }
 
 function updateHands(dt) {
@@ -812,6 +849,7 @@ function updateHands(dt) {
       const joints = hands[i].joints;
       drawTrackedGlove(glovesHand[i], joints);
       updateFist(i, joints);
+      if (held[i] && held[i] === P.syringe && grabMode[i] === 'pinch' && !P.twist) penPose(i);
     } else {
       glovesHand[i].group.visible = false;
       const b = src.gamepad?.buttons || [];
@@ -822,7 +860,7 @@ function updateHands(dt) {
     }
   }
 }
-function anchorFor(i) { return isHand[i] ? anchors[i] : grips[i]; }
+function anchorFor(i) { return isHand[i] ? (grabMode[i] === 'pinch' ? pinchAnchors[i] : anchors[i]) : grips[i]; }
 
 function nearestItem(point, maxDist, ignore = null) {
   let best = null, bestD = maxDist;
@@ -1871,7 +1909,7 @@ function spawnProcedure() {
   Object.assign(vial.userData, { kind: 'vidro', grip: new THREE.Vector3(0, 0.024, 0), gripMode: 'vertical' });
   applyShapes(vial, shapesFor('vial')); makeItemBody(vial);
 
-  const ad = registerItem(buildAdapter(), 'Adaptador', new THREE.Vector3(0.70, 0.75 + 0.0135, 0.0));
+  const ad = registerItem(buildAdapter(), 'OncoSafe', new THREE.Vector3(0.70, 0.75 + 0.0135, 0.0));
   Object.assign(ad.userData, { kind: 'plastico', grip: new THREE.Vector3(0, 0.012, 0), gripMode: 'vertical' });
   applyShapes(ad, { ...SHAPES.adapter, com: new THREE.Vector3(...SHAPES.adapter.com) }); makeItemBody(ad);
 
@@ -1886,6 +1924,7 @@ function spawnProcedure() {
   Object.assign(P, { vial, adapter: ad, syringe: syr, adapterOn: false, syringeOn: false, stroke: 0, twist: null, plunger: null,
     done: [false, false, false, false, false], allDone: false, inside: 0 });
   setStroke(0);
+  makeGhost();
   procPanelKey = '';
 }
 function detachFromPlay(item) {
@@ -2011,8 +2050,14 @@ function syringePoints() {
            barrel: P.syringe.localToWorld(new THREE.Vector3(0, 0.045, 0)) };
 }
 // tenta uma ação do procedimento ao fechar a mão / apertar o gatilho (retorna true se usou)
+function otherHandHolds(item, i) { const h = item.userData.heldBy; return typeof h === 'number' && h !== i; }
 function procGrab(i, p) {
   if (!P.syringeOn) return false;
+  if (!otherHandHolds(P.vial, i)) {                // como na vida real: o conjunto fica firme na outra mão
+    const sp0 = syringePoints();
+    if (p.distanceTo(sp0.thumb) < 0.045 || p.distanceTo(sp0.barrel) < 0.05) P.hintT = { t: 'Segure o frasco com a outra mão primeiro.', until: performance.now() + 2500 };
+    return false;
+  }
   const sp = syringePoints();
   if (p.distanceTo(sp.thumb) < 0.045) {            // puxar o êmbolo
     const ax = new THREE.Vector3(0, 1, 0).applyQuaternion(P.syringe.getWorldQuaternion(new THREE.Quaternion()));
@@ -2021,7 +2066,8 @@ function procGrab(i, p) {
   }
   if (p.distanceTo(sp.barrel) < 0.05) {            // girar para desconectar
     const h = handWorld(i);
-    P.twist = { mode: 'disconnect', hand: i, angle: 0, lastQ: h.q, start: h.p, baseQ: P.syringe.quaternion.clone(), lastClick: 0 };
+    const o = P.vial.userData.heldBy, ho = handWorld(o);
+    P.twist = { mode: 'disconnect', hand: i, other: o, lastQo: ho.q, angle: 0, lastQ: h.q, start: h.p, baseQ: P.syringe.quaternion.clone(), lastClick: 0 };
     gloveFlash[i] = 1; pulse(i, 0.5, 30); return true;
   }
   return false;
@@ -2049,8 +2095,23 @@ function twistClicks(t) {                    // "catraca" a cada 15° girados
   if (n > t.lastClick) { t.lastClick = n; SFX.clique(luerWorld()); if (typeof t.hand === 'number') pulse(t.hand, 0.3, 15); }
 }
 
+// "fantasma" verde mostrando onde o OncoSafe assenta no frasco
+let ghost = null;
+function makeGhost() {
+  if (ghost) scene.remove(ghost);
+  ghost = P.adapter.children[0].clone(true);
+  const gm = new THREE.MeshBasicMaterial({ color: 0x5ee08a, transparent: true, opacity: 0.28, depthWrite: false });
+  ghost.traverse(o => { if (o.isMesh) o.material = gm; });
+  ghost.visible = false; scene.add(ghost);
+}
+function setGhost(on) {
+  if (!ghost) return;
+  ghost.visible = on;
+  if (on) { P.vial.updateMatrixWorld(true); setWorldPose(ghost, P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y, 0)), P.vial.getWorldQuaternion(new THREE.Quaternion())); }
+}
 function updateProcedure(dt) {
   if (!P.vial) return;
+  P.hint = P.hintT && performance.now() < P.hintT.until ? P.hintT.t : '';
   // adaptador: guia e trava (mão ou controle)
   if (!P.adapterOn) {
     const al = adapterAlignment();
@@ -2059,8 +2120,16 @@ function updateProcedure(dt) {
     for (const b of [P.adapter.userData.body, P.vial.userData.body]) if (b) b.collisionResponse = !(near && heldAny);
     const vm = P.vial.children[0].children.find(m => m.material?.metalness === 1)?.material;
     if (vm) { vm.emissive.setHex(0x22ff77); vm.emissiveIntensity = near && heldAny ? 0.6 : 0; }
-    const pressing = typeof P.adapter.userData.heldBy === 'number' || typeof P.vial.userData.heldBy === 'number';
-    if (near && pressing && al.axial < 0.003) { if (vm) vm.emissiveIntensity = 0; lockAdapter(); }
+    const ha = P.adapter.userData.heldBy, hv = P.vial.userData.heldBy;
+    const twoHands = typeof ha === 'number' && typeof hv === 'number' && ha !== hv;     // frasco numa mão, OncoSafe na outra
+    if (near && twoHands && al.axial < 0.003) { if (vm) vm.emissiveIntensity = 0; setGhost(false); lockAdapter(); }
+    else {
+      const close = al.lateral < 0.10 && Math.abs(al.axial) < 0.12;
+      setGhost(close && (twoHands || ha === 'mouse'));
+      if (close && typeof (typeof ha === 'number' ? ha : hv) === 'number' && !twoHands)
+        P.hint = 'Use as duas mãos: o frasco numa mão e o OncoSafe na outra.';
+      else if (near && twoHands) P.hint = 'Pressione o OncoSafe para baixo até travar.';
+    }
   }
   // seringa pré-encaixada no luer não deve empurrar o frasco
   const sb = P.syringe.userData.body;
@@ -2070,16 +2139,24 @@ function updateProcedure(dt) {
   if (!P.syringeOn && P.adapterOn && !t) {
     const h = P.syringe.userData.heldBy;
     if (typeof h === 'number' && syringeAlignment(false).ok) {
-      const hw = handWorld(h);
-      P.twist = { mode: 'connect', hand: h, angle: 0, lastQ: hw.q, start: hw.p, keepPos: P.syringe.position.clone(), keepQ: P.syringe.quaternion.clone(), lastClick: 0 };
+      if (!otherHandHolds(P.vial, h)) P.hint = 'Segure o frasco com a outra mão para rosquear a seringa.';
+      else {
+        const hw = handWorld(h), o = P.vial.userData.heldBy;
+        P.twist = { mode: 'connect', hand: h, other: o, lastQo: handWorld(o).q, angle: 0, lastQ: hw.q, start: hw.p, keepPos: P.syringe.position.clone(), keepQ: P.syringe.quaternion.clone(), lastClick: 0 };
+      }
     }
   }
   if (P.twist && typeof P.twist.hand === 'number') {
     const tw = P.twist, hw = handWorld(tw.hand), { up } = vialFrame();
     if (tw.mode === 'connect' && held[tw.hand] !== P.syringe) cancelTwist();
+    else if (typeof tw.other === 'number' && P.vial.userData.heldBy !== tw.other) cancelTwist();   // soltou o frasco
     else if (hw.p.distanceTo(tw.start) > 0.08) cancelTwist();          // afastou a mão: desiste
     else {
-      tw.angle += twistAbout(tw.lastQ, hw.q, up); tw.lastQ = hw.q; twistClicks(tw);
+      // giro relativo entre as duas mãos (como rosquear de verdade)
+      let dA = twistAbout(tw.lastQ, hw.q, up); tw.lastQ = hw.q;
+      if (typeof tw.other === 'number') { const ho = handWorld(tw.other); dA -= twistAbout(tw.lastQo, ho.q, up); tw.lastQo = ho.q; }
+      tw.angle += dA; twistClicks(tw);
+      P.hint = tw.mode === 'connect' ? 'Gire a seringa ¼ de volta para rosquear.' : 'Gire a seringa ¼ de volta para soltar.';
       const prog = Math.min(1, Math.abs(tw.angle) / TWIST_NEED);
       setLuerGlow(prog);
       if (tw.mode === 'connect') {
@@ -2101,6 +2178,8 @@ function updateProcedure(dt) {
     }
   }
   // êmbolo
+  if (P.plunger && P.syringeOn && typeof P.plunger.hand === 'number' && !otherHandHolds(P.vial, P.plunger.hand)) P.plunger = null;
+  if (P.plunger && P.syringeOn && P.plunger.hand !== 'mouse') P.hint = `Puxe o êmbolo até ${fmt(ALVO_ML)} mL.`;
   if (P.plunger && P.syringeOn) {
     if (P.plunger.hand === 'mouse') setStroke(P.plunger.start + (P.plunger.y - P.plunger.y0) * 0.5);   // no mouse: mais preciso
     else {
@@ -2134,16 +2213,16 @@ let procPanelKey = '';
 const fmt = v => v.toFixed(1).replace('.', ',');
 function procSteps(vr) {
   return [
-    `Levar frasco, adaptador e seringa para a capela (${P.inside}/3)`,
-    vr ? 'Encaixar o adaptador no frasco: pressione até travar' : 'Encaixar o adaptador: solte-o em cima do frasco',
-    vr ? 'Conectar a seringa no luer e girar ¼ de volta' : 'Conectar a seringa: leve ao luer e gire com a roda do mouse',
-    vr ? `Puxar o êmbolo até ${fmt(ALVO_ML)} mL` : `Arrastar o êmbolo para cima até ${fmt(ALVO_ML)} mL`,
-    vr ? 'Desconectar a seringa: segure e gire ¼ de volta' : 'Desconectar: clique na seringa e gire com a roda',
+    `Levar frasco, OncoSafe e seringa para a capela (${P.inside}/3)`,
+    vr ? 'Frasco numa mão, OncoSafe na outra: junte e pressione até travar' : 'Encaixar o OncoSafe: solte-o em cima do frasco',
+    vr ? 'Frasco numa mão, seringa na outra (pinça): encaixe no luer e gire ¼' : 'Conectar a seringa: leve ao luer e gire com a roda do mouse',
+    vr ? `Segure o conjunto e puxe o êmbolo com a outra mão até ${fmt(ALVO_ML)} mL` : `Arrastar o êmbolo para cima até ${fmt(ALVO_ML)} mL`,
+    vr ? 'Segure o conjunto e gire a seringa ¼ de volta para soltar' : 'Desconectar: clique na seringa e gire com a roda',
   ];
 }
 function drawProcPanel() {
   const vr = renderer.xr.isPresenting, cur = P.done.indexOf(false);
-  const key = [vr, P.inside, ...P.done, fmt(syringeML()), !!P.plunger].join('|');
+  const key = [vr, P.inside, ...P.done, fmt(syringeML()), !!P.plunger, P.hint].join('|');
   if (key === procPanelKey) return;
   procPanelKey = key;
   const g = panelCanvas.getContext('2d'), W = panelCanvas.width, H = panelCanvas.height;
@@ -2152,7 +2231,7 @@ function drawProcPanel() {
   g.fillStyle = P.allDone ? '#1e8a4c' : '#005b9a'; g.beginPath(); g.roundRect(4, 4, W - 8, 84, [28, 28, 0, 0]); g.fill();
   g.fillStyle = '#fff'; g.textAlign = 'left'; g.font = 'bold 38px system-ui, sans-serif';
   g.fillText(P.allDone ? 'PROCEDIMENTO CONCLUÍDO ✓' : 'PROCEDIMENTO', 32, 58);
-  g.font = '22px system-ui, sans-serif'; g.textAlign = 'right'; g.fillText('Frasco + adaptador · sistema fechado', W - 30, 56);
+  g.font = '22px system-ui, sans-serif'; g.textAlign = 'right'; g.fillText('Frasco + OncoSafe · sistema fechado', W - 30, 56);
   g.textAlign = 'left';
   procSteps(vr).forEach((t, k) => {
     const y = 140 + k * 66, ok = P.done[k], now = k === cur;
@@ -2163,6 +2242,10 @@ function drawProcPanel() {
     g.font = (now ? 'bold ' : '') + '25px system-ui, sans-serif'; g.fillText(t, 76, y, W - 100);
   });
   g.fillStyle = '#cfe3f2'; g.font = '24px system-ui, sans-serif';
+  if (P.hint) {
+    g.fillStyle = 'rgba(255,183,77,0.16)'; g.fillRect(16, H - 112, W - 32, 44);
+    g.fillStyle = '#ffcc80'; g.font = 'bold 25px system-ui, sans-serif'; g.fillText('👉 ' + P.hint, 32, H - 82, W - 60);
+  }
   const over = P.syringeOn && !P.done[3] && syringeML() > ALVO_ML + 0.3;
   g.fillStyle = over ? '#ffb74d' : '#cfe3f2';
   g.fillText(over ? `Seringa: ${fmt(syringeML())} mL · passou do alvo: empurre o êmbolo até ${fmt(ALVO_ML)} mL`
@@ -2228,7 +2311,7 @@ spawnProcedure();
 
 buildStaticPhysics();
 
-window.game = { P, setStroke, lockAdapter, connectSyringe, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, connectSyringe, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
