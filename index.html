@@ -75,6 +75,8 @@
   <button id="vrBtn" disabled>Verificando VR…</button>
   <button id="resetBtn">Reiniciar itens</button>
   <button id="tutRestart">Rever tutorial</button>
+  <button id="guideBtn">Setas-guia: ligadas</button>
+  <button id="invBtn" style="display:none;background:#8a5a00;border-color:#b07400">Inverter conjunto (I)</button>
   <label class="file">Carregar ambiente (.glb – SketchUp)<input type="file" id="envFile" accept=".glb,.gltf"></label>
   <label class="file">Adicionar item (.glb – SolidWorks)<input type="file" id="itemFile" accept=".glb,.gltf" multiple></label>
   <div id="msg"></div>
@@ -422,7 +424,7 @@ const lamp = new THREE.PointLight(0xffffff, 1.2, 1.6);
 lamp.position.set(0, 1.2, CZ - 0.45);
 scene.add(lamp);
 
-makeTable({ x: 0.75, z: 0.05, w: 0.4, d: 0.8, h: 0.75, color: 0xb4bbc2, isTarget: false });
+makeTable({ x: 0.75, z: 0.05, w: 0.6, d: 0.9, h: 0.75, color: 0xb4bbc2, isTarget: false });   // mesa de inox com os materiais
 
 // Faixa luminosa marcando a área da mesa
 const zone = new THREE.Mesh(
@@ -434,9 +436,9 @@ zone.position.set((table.minX + table.maxX) / 2, table.top + 0.002, (table.minZ 
 scene.add(zone);
 
 // Placar dentro do VR
-const panelCanvas = document.createElement('canvas'); panelCanvas.width = 1024; panelCanvas.height = 520;
+const panelCanvas = document.createElement('canvas'); panelCanvas.width = 1024; panelCanvas.height = 600;
 const panelTex = new THREE.CanvasTexture(panelCanvas); panelTex.colorSpace = THREE.SRGBColorSpace;
-const panel = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.335), new THREE.MeshBasicMaterial({ map: panelTex, transparent: true, toneMapped: false }));
+const panel = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.387), new THREE.MeshBasicMaterial({ map: panelTex, transparent: true, toneMapped: false }));
 panel.position.set(-1.2, 1.35, -0.55);   // ao lado esquerdo da capela, virado para o jogador
 panel.rotation.y = 0.45;
 scene.add(panel);
@@ -616,13 +618,13 @@ function resetItems() {
   P.plunger = null;
   if (dragging) { dragging = null; controls.enabled = true; }
   for (const it of [...items]) {
-    if (it === P.vial || it === P.adapter || it === P.syringe) continue;
+    if (P.objs.includes(it)) continue;
     const u = it.userData;                                   // itens extras carregados por .glb
     if (u.heldBy !== null) { if (typeof u.heldBy === 'number') held[u.heldBy] = null; u.heldBy = null; }
     scene.attach(it);
     resetOne(it);
   }
-  resetProcedure();                                          // frasco, adaptador e seringa voltam separados à mesa
+  resetProcedure();                                          // procedimento volta ao início, materiais separados na mesa
 }
 document.getElementById('resetBtn').onclick = resetItems;
 
@@ -824,7 +826,7 @@ function pinchGrab(i) {
   const p = pinchAnchors[i].getWorldPosition(new THREE.Vector3());
   if (procGrab(i, p)) return true;
   const s = P.syringe;
-  if (s && !P.syringeOn && items.includes(s) && _box.setFromObject(s).distanceToPoint(p) < 0.035) { holdItem(i, s); return true; }
+  if (s && !P.syrOn && items.includes(s) && _box.setFromObject(s).distanceToPoint(p) < 0.035) { holdItem(i, s); return true; }
   return false;
 }
 // seringa na pinça: o corpo passa entre o polegar e o indicador e deita ao longo do indicador, bico para a frente
@@ -862,10 +864,13 @@ function updateHands(dt) {
 }
 function anchorFor(i) { return isHand[i] ? (grabMode[i] === 'pinch' ? pinchAnchors[i] : anchors[i]) : grips[i]; }
 
-function nearestItem(point, maxDist, ignore = null) {
+function nearestItem(point, maxDist, ignore = null, hand = null) {
   let best = null, bestD = maxDist;
   for (const it of items) {
     if (it === ignore) continue;
+    // não "rouba" o item da outra mão (evita trocar o conjunto de mão sem querer)
+    const hb = it.userData.heldBy;
+    if (hand !== null && typeof hb === 'number' && hb !== hand) continue;
     _box.setFromObject(it);
     const d = _box.distanceToPoint(point);
     if (d < bestD) { bestD = d; best = it; }
@@ -875,7 +880,7 @@ function nearestItem(point, maxDist, ignore = null) {
 function grab(i) {
   const a = anchorFor(i); a.getWorldPosition(_p);
   if (procGrab(i, _p)) return;             // êmbolo ou girar a seringa para desconectar
-  const item = nearestItem(_p, isHand[i] ? HAND_REACH : 0.07);
+  const item = nearestItem(_p, isHand[i] ? HAND_REACH : 0.07, null, i);
   // alça do vidro tem prioridade se estiver mais perto que o instrumento
   const hd = handleDistance(_p);
   if (hd < 0.07) {
@@ -895,6 +900,9 @@ function holdItem(i, item) {
   a.attach(item);
   const left = sources[i]?.handedness === 'left';
   if (u.gripMode === 'frasco') holdVialPose(item, left, !isHand[i]);   // frasco: pega real, com o topo para fora da mão
+  else if (u.gripMode === 'palma' && isHand[i]) {           // gaze / bolsa: espalmada embaixo da mão
+    item.quaternion.identity(); item.position.copy(u.grip).multiplyScalar(-1).add(new THREE.Vector3(0, -0.02, 0));
+  }
   else if (isHand[i] && u.grip) snapToPalm(item, left);
   u.heldBy = i; setHeldPhysics(item, true);
   gloveFlash[i] = 1;                       // luva pisca verde: confirma que pegou
@@ -1088,7 +1096,7 @@ function startMouseDragAt(item, e) {
   if (e) {
     const pt = new THREE.Vector3(); raycaster.ray.intersectPlane(dragPlane, pt);
     dragOffset.set(item.position.x - pt.x, 0, item.position.z - pt.z);
-    if (dragOffset.length() > 0.15 || item === P.syringe) dragOffset.set(0, 0, 0);   // seringa: o bico segue o cursor
+    if (dragOffset.length() > 0.15 || item === P.syringe || item === P.gauze) dragOffset.set(0, 0, 0);   // seringa/gaze seguem o cursor
     moveDrag(e);
   }
   wakeAll();
@@ -1097,10 +1105,20 @@ function moveDrag(e) {
   setNdc(e);
   const pt = new THREE.Vector3();
   if (!raycaster.ray.intersectPlane(dragPlane, pt)) return;
+  if (dragging === P.gauze) {                                // gaze: o cursor desliza sobre a bancada da capela
+    const pt2 = new THREE.Vector3();
+    if (raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -table.top), pt2) && insideSurface(pt2.setY(table.top))) pt.copy(pt2);
+    if (curStep() === 'septo') {                             // gaze no topo do frasco: encosta no septo
+      const top = P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y, 0));
+      if (raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -top.y), pt2) && Math.hypot(pt2.x - top.x, pt2.z - top.z) < 0.05) pt.set(top.x, top.y, top.z);
+    }
+  }
   dragging.position.set(
     THREE.MathUtils.clamp(pt.x + dragOffset.x, LAB.minX + 0.05, LAB.maxX - 0.05),
     DRAG_Y + dragBottom,
     THREE.MathUtils.clamp(pt.z + dragOffset.z, LAB.minZ + 0.05, LAB.maxZ - 0.05));
+  const hy = procDragHeight(dragging, dragging.position);    // gaze desce até a bancada / septo
+  if (hy !== null) dragging.position.y = hy + dragBottom;
   procMouseDragMove(dragging.position.clone());
 }
 renderer.domElement.addEventListener('pointermove', e => {
@@ -1113,15 +1131,8 @@ renderer.domElement.addEventListener('pointermove', e => {
   applyHighlights(new Set(hit ? [itemOf(hit.object)] : []));
 });
 renderer.domElement.addEventListener('pointerup', () => {
-  if (procPointerUp()) return;
-  if (!dragging || dragging === P.syringe && P.twist?.mode === 'connect') {
-    if (dragging === P.syringe) { dragging = null; controls.enabled = false; }   // seringa fica no luer esperando o giro
-    return;
-  }
-  if (dragging === P.adapter && !P.adapterOn) {             // soltou o adaptador em cima do frasco: encaixa
-    const al = adapterAlignment();
-    if (al.lateral < 0.025 && al.vialUp > 0.87 && al.axial > -0.01) { controls.enabled = true; lockAdapter(); return; }
-  }
+  if (procPointerUp()) return;                              // encaixes, conexões, etiqueta, êmbolo (procedimento)
+  if (!dragging) return;
   dropMouseItem();
 });
 function dropMouseItem() {
@@ -1209,16 +1220,19 @@ function labelVialTexture() {
   return t;
 }
 // ===================== Materiais do procedimento (modelados a partir das fotos) =====================
-// Frasco-ampola 10 mL (Ø 2 cm) · adaptador de sistema fechado (spike amarelo, luer, câmara Ø 5 cm) · seringa 10 mL
+// Frasco-ampola 10 mL (Ø 2 cm) · adaptador de sistema fechado (spike amarelo, luer, câmara Ø 5 cm) · seringa 5 mL
 // Todas as medidas em metros. Origem do frasco: fundo. Origem do adaptador: ponto que assenta no topo do frasco.
 // Origem da seringa: ponta do bico (luer), com o corpo subindo em +Y.
 const SEAT_Y = 0.0545;          // topo do frasco (onde o adaptador assenta)
 const LUER_TOP = 0.045;         // topo do conector luer, no espaço do adaptador
 const SYR_IN = 0.008;           // quanto o bico da seringa entra no luer
-const STROKE_MAX = 0.060;       // curso do êmbolo (10 mL)
-const ML_PER_M = 10 / 0.0614;   // área interna Ø 14,4 mm → 10 mL em 61,4 mm
+const SYR_ML = 5;               // seringa de 5 mL
+const SYR_R = 0.0061;           // raio interno (Ø 12,2 mm)
+const SYR_L = SYR_ML * 1e-6 / (Math.PI * SYR_R * SYR_R);   // comprimento graduado ≈ 42,8 mm
+const STROKE_MAX = SYR_L;       // curso do êmbolo (5 mL)
+const ML_PER_M = SYR_ML / SYR_L;  // mL por metro de curso
 const VIAL_ML = 10;             // volume inicial do frasco
-const ALVO_ML = 5.0;            // volume a aspirar (provisório: confirmar no procedimento da BMR)
+const ALVO_ML = 5.0;            // volume a aspirar: 5 mL de medicamento (seringa cheia)
 // Comportamento do balão (provisório: confirmar no procedimento da BMR).
 // Ao aspirar, o ar do balão entra no frasco para repor o líquido retirado → o balão murcha.
 const BALAO_MURCHA_AO_ASPIRAR = true;
@@ -1317,10 +1331,11 @@ function syringeScaleTexture() {
   const c = document.createElement('canvas'); c.width = 256; c.height = 1024;
   const g = c.getContext('2d'); g.clearRect(0, 0, 256, 1024);
   g.fillStyle = '#111'; g.font = 'bold 44px system-ui, sans-serif'; g.textAlign = 'left';
-  // 0 mL embaixo (perto do bico) até 10 mL em cima; graduação a cada 0,2 mL
-  for (let k = 0; k <= 50; k++) {
-    const y = 1000 - k * (976 / 50), w = k % 5 === 0 ? 120 : 60;
-    g.fillRect(20, y - 2, w, 4);
+  // 0 mL embaixo (perto do bico) até 5 mL em cima; graduação a cada 0,2 mL, número a cada 1 mL
+  const n = SYR_ML * 5;
+  for (let k = 0; k <= n; k++) {
+    const y = 1000 - k * (976 / n), w = k % 5 === 0 ? 120 : 60;
+    g.fillRect(20, y - 3, w, 6);
     if (k % 5 === 0) g.fillText(String(k / 5), 150, y + 14);
   }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
@@ -1328,64 +1343,32 @@ function syringeScaleTexture() {
 }
 function buildSyringe() {
   const M = PM(), g = new THREE.Group(), b = partsBuilder();
-  const B0 = 0.014, B1 = B0 + 0.0614 + 0.004;     // corpo graduado
+  const RO = SYR_R + 0.0007;                         // raio externo do corpo (seringa de 5 mL)
+  const B0 = 0.014, B1 = B0 + SYR_L + 0.004;         // corpo graduado
   b.cyl(0.0022, 0, 0.009, M.claro, 16, 0, 0, 0.003);            // bico luer
-  b.cyl(0.0058, 0.002, 0.011, M.claro, 24);                       // rosca do luer lock
-  b.lathe([V2p(0.003, 0.011), V2p(0.0085, B0)], M.claro, 32);     // ombro
-  b.add(new THREE.CylinderGeometry(0.0085, 0.0085, B1 - B0, 32, 1, true).translate(0, (B0 + B1) / 2, 0), M.claro);
-  b.box(-0.017, B1, -0.006, 0.017, B1 + 0.0025, 0.006, M.claro);  // aletas
+  b.cyl(0.0055, 0.002, 0.011, M.claro, 24);                       // rosca do luer lock
+  b.lathe([V2p(0.003, 0.011), V2p(RO, B0)], M.claro, 32);         // ombro
+  b.add(new THREE.CylinderGeometry(RO, RO, B1 - B0, 32, 1, true).translate(0, (B0 + B1) / 2, 0), M.claro);
+  b.box(-0.015, B1, -0.005, 0.015, B1 + 0.0022, 0.005, M.claro);  // aletas
   b.finish(g, [M.claro]);
   // escala graduada
-  const sc = new THREE.Mesh(new THREE.CylinderGeometry(0.0087, 0.0087, 0.0614, 24, 1, true, 1.5 * Math.PI - 0.5, 1.0),
+  const sc = new THREE.Mesh(new THREE.CylinderGeometry(RO + 0.0002, RO + 0.0002, SYR_L, 24, 1, true, 1.5 * Math.PI - 0.6, 1.2),
     new THREE.MeshBasicMaterial({ map: syringeScaleTexture(), transparent: true, depthWrite: false }));
-  sc.position.y = B0 + 0.0614 / 2 + 0.001; sc.renderOrder = 3; g.add(sc);
+  sc.position.y = B0 + SYR_L / 2 + 0.001; sc.renderOrder = 3; g.add(sc);
   // líquido aspirado (altura = curso do êmbolo)
-  const liq = new THREE.Mesh(new THREE.CylinderGeometry(0.0074, 0.0074, 1, 24).translate(0, 0.5, 0), M.liquido);
+  const liq = new THREE.Mesh(new THREE.CylinderGeometry(SYR_R - 0.0002, SYR_R - 0.0002, 1, 24).translate(0, 0.5, 0), M.liquido);
   liq.position.y = B0; liq.scale.y = 0.0001; liq.renderOrder = 1; g.add(liq);
   // êmbolo: borracha + haste em cruz + apoio do polegar (sobe com o curso)
   const rod = new THREE.Group(); g.add(rod);
   const rb = partsBuilder();
-  rb.cyl(0.0076, B0, B0 + 0.006, M.preto, 24);
-  rb.cyl(0.0079, B0 + 0.001, B0 + 0.002, M.preto, 24); rb.cyl(0.0079, B0 + 0.004, B0 + 0.005, M.preto, 24);
-  rb.box(-0.0055, B0 + 0.006, -0.0008, 0.0055, B1 + 0.016, 0.0008, M.branco);
-  rb.box(-0.0008, B0 + 0.006, -0.0055, 0.0008, B1 + 0.016, 0.0055, M.branco);
-  rb.cyl(0.009, B1 + 0.016, B1 + 0.018, M.branco, 28);
+  rb.cyl(SYR_R - 0.0002, B0, B0 + 0.005, M.preto, 24);
+  rb.cyl(SYR_R + 0.0001, B0 + 0.001, B0 + 0.0018, M.preto, 24); rb.cyl(SYR_R + 0.0001, B0 + 0.0032, B0 + 0.004, M.preto, 24);
+  rb.box(-0.0043, B0 + 0.005, -0.0007, 0.0043, B1 + 0.016, 0.0007, M.branco);
+  rb.box(-0.0007, B0 + 0.005, -0.0043, 0.0007, B1 + 0.016, 0.0043, M.branco);
+  rb.cyl(0.0075, B1 + 0.016, B1 + 0.018, M.branco, 28);
   rb.finish(rod);
   g.userData.parts = { rod, liquid: liq, thumbY: B1 + 0.017, B0 };
   return g;
-}
-
-// formas de colisão de cada material (e das montagens)
-const SHAPES = {
-  vial: { mass: 0.03, com: [0, 0.024, 0], shapes: [
-    { type: 'cyl', r: 0.0100, h: SEAT_Y, pos: [0, SEAT_Y / 2, 0] } ] },
-  adapter: { mass: 0.012, com: [0.012, 0.014, 0], shapes: [
-    { type: 'cyl', r: 0.0130, h: 0.0255, pos: [0, 0.0068, 0] },
-    { type: 'cyl', r: 0.0050, h: 0.0260, pos: [0, 0.0325, 0] },
-    { type: 'cyl', r: 0.0235, h: 0.0400, pos: [0.031, 0.0175, 0], axis: 'x' },
-    { type: 'cyl', r: 0.0025, h: 0.0120, pos: [0, -0.006, 0] } ] },
-  syringe: { mass: 0.015, com: [0, 0.055, 0], shapes: [
-    { type: 'cyl', r: 0.0090, h: 0.080, pos: [0, 0.040, 0] },
-    { type: 'box', half: [0.017, 0.0015, 0.006], pos: [0, 0.081, 0] },
-    { type: 'cyl', r: 0.0050, h: 0.060, pos: [0, 0.110, 0] } ] },
-};
-function shapesFor(state) {   // state: 'vial' | 'vial+adapter' | 'vial+adapter+syringe'
-  const out = [...SHAPES.vial.shapes];
-  let mass = SHAPES.vial.mass, com = [0, 0.024, 0];
-  if (state !== 'vial') {
-    for (const s of SHAPES.adapter.shapes) out.push({ ...s, pos: [s.pos[0], s.pos[1] + SEAT_Y, s.pos[2]] });
-    mass += SHAPES.adapter.mass; com = [0.004, 0.034, 0];
-  }
-  if (state === 'vial+adapter+syringe') {
-    const y0 = SEAT_Y + LUER_TOP - SYR_IN;
-    for (const s of SHAPES.syringe.shapes) if (s.type === 'cyl') out.push({ ...s, pos: [s.pos[0], s.pos[1] + y0, s.pos[2]] });
-    mass += SHAPES.syringe.mass; com = [0.003, 0.055, 0];
-  }
-  return { shapes: out, mass, com: new THREE.Vector3(...com) };
-}
-function applyShapes(item, def) {
-  const u = item.userData;
-  u.shapes = def.shapes; u.mass = def.mass; u.com = def.com.clone ? def.com.clone() : new THREE.Vector3(...def.com);
 }
 
 
@@ -1873,7 +1856,7 @@ renderer.domElement.addEventListener('pointerup', () => {
 
 // ---------- Botão "Reiniciar" na mesa de inox ----------
 // Fica em cima da mesa, na borda do fundo (oposta ao jogador), atrás dos instrumentos
-const RESET_POS = new THREE.Vector3(0.922, 0.75, 0.06);
+const RESET_POS = new THREE.Vector3(1.022, 0.75, 0.06);
 let resetBtn = null, resetMat = null, resetPress = 0;
 (function setupResetButton() {
   const g = new THREE.Group(); g.position.copy(RESET_POS); scene.add(g);
@@ -1920,34 +1903,322 @@ function updateResetButton(dt) {
   resetMat.emissiveIntensity = resetPress * 1.5;
 }
 
-// ===================== Procedimento: montagem, conexão, aspiração e desconexão =====================
-const P = { vial: null, adapter: null, syringe: null, adapterOn: false, syringeOn: false, stroke: 0,
-            twist: null, plunger: null, done: [false, false, false, false, false], allDone: false, inside: 0 };
-const TWIST_NEED = THREE.MathUtils.degToRad(70);      // ~¼ de volta para conectar / desconectar
+// ===================== Procedimento completo em sistema fechado (CSTD) =====================
+// Fases: preparação da cabine → materiais → montagem e conexão → aspiração → transferência → finalização.
+// Mecânicas reais no Quest (duas mãos, pinça, inverter, empurrar até o clique) e equivalentes no PC (mouse).
+const fmt = v => v.toFixed(1).replace('.', ',');
+const PURGA_S = 15;            // purga da capela (simulada em 15 s)
+const AGUARDA_S = 30;          // capela ligada após o preparo: 30 min simulados em 30 s
+const COBERTURA = 0.85;        // fração da bancada que precisa ser limpa
+const SEPTO_S = 1.5;           // tempo esfregando a gaze no septo
+const BOLHA_ML = 0.3;          // ar que entra no começo da aspiração (espaço morto do sistema)
+const BOLSA_ML = 100;          // bolsa de destino (SF 0,9% 100 mL)
+const SA_LEN = 0.034;          // comprimento do adaptador de seringa
+const CON_IN = 0.006;          // quanto o conector entra no luer do OncoSafe / porta da bolsa
+const TIP_Y = SYR_IN - SA_LEN; // ponta de conexão da seringa com adaptador (espaço da seringa)
+
+const STEPS = [
+  { id: 'ligar',      fase: 'Preparação da cabine', vr: 'Ligue a capela (botão verde) e aguarde a purga' },
+  { id: 'limpar1',    fase: 'Preparação da cabine', vr: 'Limpe a bancada com a gaze com álcool 70%', pc: 'Arraste a gaze com álcool 70% sobre toda a bancada' },
+  { id: 'campo',      fase: 'Preparação da cabine', vr: 'Forre a bancada com o campo absorvente', pc: 'Arraste o campo absorvente para a bancada' },
+  { id: 'vidro',      fase: 'Preparação da cabine', vr: 'Confira: vidro na altura de trabalho e grelhas livres' },
+  { id: 'materiais',  fase: 'Materiais', vr: 'Leve frasco, OncoSafe, adaptador de seringa, seringa e bolsa para a capela' },
+  { id: 'septo',      fase: 'Materiais', vr: 'Desinfete o septo do frasco: esfregue a gaze no topo', pc: 'Arraste a gaze até o topo do frasco e segure' },
+  { id: 'montagem',   fase: 'Montagem e conexão', vr: 'Frasco numa mão, OncoSafe na outra: pressione até travar', pc: 'Solte o OncoSafe em cima do frasco' },
+  { id: 'sadapt',     fase: 'Montagem e conexão', vr: 'Adaptador numa mão, seringa na outra: encaixe e gire ¼', pc: 'Leve a seringa ao adaptador de seringa e gire com a roda' },
+  { id: 'ar_puxar',   fase: 'Montagem e conexão', vr: `Puxe ${fmt(ALVO_ML)} mL de ar na seringa`, pc: `Arraste o êmbolo para puxar ${fmt(ALVO_ML)} mL de ar` },
+  { id: 'conectar',   fase: 'Montagem e conexão', vr: 'Encaixe a seringa no conector do OncoSafe e pressione até o clique', pc: 'Solte a seringa em cima do conector do OncoSafe' },
+  { id: 'ar_injetar', fase: 'Aspiração', vr: 'Injete o ar no frasco: empurre o êmbolo (o balão enche)', pc: 'Arraste o êmbolo para baixo: injete o ar (o balão enche)' },
+  { id: 'inverter',   fase: 'Aspiração', vr: 'Inverta o conjunto: frasco por cima', pc: 'Inverta o conjunto: botão "Inverter conjunto" ou tecla I' },
+  { id: 'aspirar',    fase: 'Aspiração', vr: `Puxe o êmbolo até ${fmt(ALVO_ML)} mL (o balão murcha)`, pc: `Arraste o êmbolo até ${fmt(ALVO_ML)} mL (o balão murcha)` },
+  { id: 'bolhas',     fase: 'Aspiração', vr: `Elimine as bolhas e confira ${fmt(ALVO_ML)} mL na graduação` },
+  { id: 'desconectar', fase: 'Aspiração', vr: 'Desconecte a seringa do OncoSafe: gire ¼', pc: 'Clique na seringa e gire com a roda para soltar' },
+  { id: 'bolsa_con',  fase: 'Transferência', vr: 'Conecte a seringa ao adaptador da bolsa (pressione até o clique)', pc: 'Solte a seringa no adaptador da bolsa' },
+  { id: 'injetar',    fase: 'Transferência', vr: `Injete os ${fmt(ALVO_ML)} mL na bolsa`, pc: 'Arraste o êmbolo até 0 mL' },
+  { id: 'bolsa_desc', fase: 'Transferência', vr: 'Desconecte a seringa da bolsa (puxe)', pc: 'Clique na seringa para soltar da bolsa' },
+  { id: 'rotular',    fase: 'Transferência', vr: 'Cole a etiqueta na bolsa' },
+  { id: 'embalar',    fase: 'Transferência', vr: 'Coloque a bolsa na bandeja de saída' },
+  { id: 'descartar',  fase: 'Finalização', vr: 'Descarte frasco+OncoSafe, seringa e campo sem desmontar' },
+  { id: 'limpar2',    fase: 'Finalização', vr: 'Limpe a bancada com álcool 70%', pc: 'Arraste a gaze sobre toda a bancada' },
+  { id: 'aguardar',   fase: 'Finalização', vr: 'Mantenha a capela ligada por 30 min (simulado)' },
+];
+const stepIndex = id => STEPS.findIndex(s => s.id === id);
+const curStep = () => STEPS[P.step]?.id || 'fim';
+const reached = id => P.step >= stepIndex(id);
+
+const P = { step: 0, objs: [], hint: '', hintT: null, twist: null, plunger: null, allDone: false, inside: 0 };
+const TWIST_NEED = THREE.MathUtils.degToRad(70);      // ~¼ de volta
 const _pa = new THREE.Vector3(), _pb = new THREE.Vector3(), _pc = new THREE.Vector3(), _ax = new THREE.Vector3();
 const _qa2 = new THREE.Quaternion(), _qb2 = new THREE.Quaternion(), _m42 = new THREE.Matrix4(), _sc = new THREE.Vector3();
 const YAXIS = new THREE.Vector3(0, 1, 0);
 
+// ---------- novos materiais ----------
+function canvasMat(w, h, draw, extra = {}) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  return new THREE.MeshStandardMaterial({ map: t, roughness: 0.85, ...extra });
+}
+function weave(g, w, h, base, line) {
+  g.fillStyle = base; g.fillRect(0, 0, w, h); g.strokeStyle = line; g.lineWidth = 2;
+  for (let k = 0; k < w; k += 8) { g.beginPath(); g.moveTo(k, 0); g.lineTo(k, h); g.stroke(); }
+  for (let k = 0; k < h; k += 8) { g.beginPath(); g.moveTo(0, k); g.lineTo(w, k); g.stroke(); }
+}
+function buildGauze() {                         // gaze dobrada, embebida em álcool 70%
+  const g = new THREE.Group();
+  const m = new THREE.Mesh(new RoundedBoxGeometry(0.075, 0.008, 0.075, 2, 0.003),
+    canvasMat(128, 128, (c, w, h) => weave(c, w, h, '#eef4f8', 'rgba(150,170,190,0.35)')));
+  m.position.y = 0.004; g.add(m);
+  return g;
+}
+function padTexture(w, h) {
+  return canvasMat(512, 384, (c, W, H) => {
+    c.fillStyle = '#f7f9fb'; c.fillRect(0, 0, W, H);
+    c.strokeStyle = 'rgba(120,150,190,0.35)'; c.lineWidth = 3;
+    for (let k = -H; k < W; k += 28) { c.beginPath(); c.moveTo(k, 0); c.lineTo(k + H, H); c.stroke(); c.beginPath(); c.moveTo(k + H, 0); c.lineTo(k, H); c.stroke(); }
+    c.strokeStyle = '#7fb3e6'; c.lineWidth = 14; c.strokeRect(7, 7, W - 14, H - 14);
+  });
+}
+function buildPadFolded() {                     // campo absorvente dobrado
+  const g = new THREE.Group();
+  const m = new THREE.Mesh(new RoundedBoxGeometry(0.12, 0.012, 0.09, 2, 0.003), padTexture());
+  m.position.y = 0.006; g.add(m);
+  return g;
+}
+function buildSyringeAdapter() {                // adaptador de seringa do sistema fechado (origem no topo, luer fêmea)
+  const M = PM(), g = new THREE.Group(), b = partsBuilder();
+  b.cyl(0.0046, -0.006, 0, M.branco, 20);                                  // luer fêmea (recebe a seringa)
+  b.cyl(0.0075, -SA_LEN + 0.006, -0.006, M.claro, 28);                     // corpo transparente
+  b.cyl(0.0086, -0.021, -0.015, M.amarelo, 28);                            // anel amarelo (pega)
+  for (let k = 0; k < 10; k++) { const a = k / 10 * Math.PI * 2; b.add(new THREE.BoxGeometry(0.0012, 0.006, 0.0012).translate(Math.cos(a) * 0.0088, -0.018, Math.sin(a) * 0.0088), M.amarelo); }
+  b.cyl(0.0052, -SA_LEN, -SA_LEN + 0.006, M.branco, 24);                   // conector com membrana (macho)
+  b.cyl(0.0032, -SA_LEN - 0.001, -SA_LEN, M.amarelo, 16);
+  b.finish(g, [M.claro]);
+  return g;
+}
+function buildBag() {                           // bolsa IV 100 mL deitada; porta com adaptador do sistema fechado em +X
+  const M = PM(), g = new THREE.Group();
+  const pvc = new THREE.MeshStandardMaterial({ color: 0xeaf3f7, roughness: 0.15, transparent: true, opacity: 0.45, depthWrite: false });
+  const body = new THREE.Mesh(new RoundedBoxGeometry(0.17, 0.02, 0.11, 4, 0.009), pvc); body.position.y = 0.01; body.renderOrder = 2; g.add(body);
+  const liq = new THREE.Mesh(new RoundedBoxGeometry(0.155, 0.014, 0.095, 3, 0.006),
+    new THREE.MeshStandardMaterial({ color: 0xdfeff6, roughness: 0.1, transparent: true, opacity: 0.55, depthWrite: false }));
+  liq.position.y = 0.009; liq.renderOrder = 1; g.add(liq);
+  const print = new THREE.Mesh(new THREE.PlaneGeometry(0.09, 0.06), canvasMat(360, 240, (c, W, H) => {
+    c.clearRect(0, 0, W, H); c.fillStyle = 'rgba(255,255,255,0.0)'; c.fillRect(0, 0, W, H);
+    c.fillStyle = '#1f5fa8'; c.font = 'bold 40px system-ui, sans-serif'; c.fillText('Cloreto de sódio 0,9%', 10, 60, W - 20);
+    c.fillStyle = '#333'; c.font = '34px system-ui, sans-serif'; c.fillText('100 mL · solução injetável', 10, 120, W - 20);
+    for (let k = 0; k <= 10; k++) c.fillRect(W - 40, 150 + k * 8, k % 5 ? 14 : 26, 2);
+  }, { transparent: true, depthWrite: false }));
+  print.rotation.x = -Math.PI / 2; print.position.set(-0.02, 0.0205, 0); g.add(print);
+  // portas: tubo de infusão e porta com adaptador (amarelo) apontando para +X
+  const b = partsBuilder();
+  b.add(new THREE.CylinderGeometry(0.003, 0.003, 0.02, 12).rotateZ(Math.PI / 2).translate(0.093, 0.01, -0.022), M.branco);
+  b.add(new THREE.CylinderGeometry(0.0035, 0.0035, 0.014, 12).rotateZ(Math.PI / 2).translate(0.092, 0.01, 0.022), M.claro);
+  b.add(new THREE.CylinderGeometry(0.0075, 0.0075, 0.018, 20).rotateZ(Math.PI / 2).translate(0.108, 0.01, 0.022), M.amarelo);
+  b.add(new THREE.CylinderGeometry(0.0048, 0.0048, 0.006, 20).rotateZ(Math.PI / 2).translate(0.12, 0.01, 0.022), M.branco);
+  b.finish(g, [M.claro]);
+  g.userData.parts = { liquid: liq, port: new THREE.Vector3(0.123, 0.01, 0.022), portAxis: new THREE.Vector3(1, 0, 0) };
+  return g;
+}
+function labelBagTexture() {
+  return canvasMat(420, 240, (c, W, H) => {
+    c.fillStyle = '#fffef6'; c.fillRect(0, 0, W, H); c.fillStyle = '#9b3123'; c.fillRect(0, 0, W, 38);
+    c.fillStyle = '#fff'; c.font = 'bold 26px system-ui, sans-serif'; c.fillText('MEDICAMENTO PERIGOSO', 12, 28);
+    c.fillStyle = '#222'; c.font = '24px system-ui, sans-serif';
+    ['Paciente: ______________', 'Medicamento: 5 mL em SF 0,9%', 'Volume final: 105 mL', 'Preparado em capela · sistema fechado'].forEach((t, k) => c.fillText(t, 12, 74 + k * 40, W - 24));
+  });
+}
+function buildLabel() {
+  const g = new THREE.Group();
+  const m = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.0015, 0.04), [0, 0, labelBagTexture(), 0, 0, 0].map((x, k) => k === 2 ? x : new THREE.MeshStandardMaterial({ color: 0xfffef6 })));
+  m.position.y = 0.00075; g.add(m);
+  return g;
+}
+
+// ---------- formas de colisão ----------
+const SHAPES = {
+  vial: { mass: 0.03, com: [0, 0.024, 0], shapes: [
+    { type: 'cyl', r: 0.0100, h: SEAT_Y, pos: [0, SEAT_Y / 2, 0] } ] },
+  adapter: { mass: 0.012, com: [0.012, 0.014, 0], shapes: [
+    { type: 'cyl', r: 0.0130, h: 0.0255, pos: [0, 0.0068, 0] },
+    { type: 'cyl', r: 0.0050, h: 0.0260, pos: [0, 0.0325, 0] },
+    { type: 'cyl', r: 0.0235, h: 0.0400, pos: [0.031, 0.0175, 0], axis: 'x' },
+    { type: 'cyl', r: 0.0025, h: 0.0120, pos: [0, -0.006, 0] } ] },
+  syringe: { mass: 0.010, com: [0, 0.040, 0], shapes: [           // seringa de 5 mL
+    { type: 'cyl', r: 0.0070, h: 0.062, pos: [0, 0.031, 0] },
+    { type: 'box', half: [0.015, 0.0012, 0.005], pos: [0, 0.062, 0] },
+    { type: 'cyl', r: 0.0042, h: 0.045, pos: [0, 0.083, 0] } ] },
+  sadapter: { mass: 0.006, com: [0, -SA_LEN / 2, 0], shapes: [
+    { type: 'cyl', r: 0.0086, h: SA_LEN, pos: [0, -SA_LEN / 2, 0] } ] },
+  gauze: { mass: 0.004, com: [0, 0.004, 0], shapes: [ { type: 'box', half: [0.0375, 0.004, 0.0375], pos: [0, 0.004, 0] } ] },
+  pad: { mass: 0.02, com: [0, 0.006, 0], shapes: [ { type: 'box', half: [0.06, 0.006, 0.045], pos: [0, 0.006, 0] } ] },
+  bag: { mass: 0.11, com: [0, 0.01, 0], shapes: [ { type: 'box', half: [0.085, 0.01, 0.055], pos: [0, 0.01, 0] },
+    { type: 'cyl', r: 0.0075, h: 0.03, pos: [0.105, 0.01, 0.022], axis: 'x' } ] },
+  label: { mass: 0.002, com: [0, 0.00075, 0], shapes: [ { type: 'box', half: [0.035, 0.0008, 0.02], pos: [0, 0.00075, 0] } ] },
+};
+const syrShapes = () => {
+  const out = [...SHAPES.syringe.shapes];
+  if (P.sadOn) out.push({ type: 'cyl', r: 0.0086, h: SA_LEN, pos: [0, SYR_IN - SA_LEN / 2, 0] });
+  return { shapes: out, mass: SHAPES.syringe.mass + (P.sadOn ? SHAPES.sadapter.mass : 0), com: new THREE.Vector3(0, 0.035, 0) };
+};
+const SYR_ON_VIAL_Y = SEAT_Y + LUER_TOP - CON_IN - TIP_Y;   // origem da seringa conectada ao OncoSafe (espaço do frasco)
+function shapesFor(state) {   // 'vial' | 'vial+adapter' | 'vial+adapter+syringe'
+  const out = [...SHAPES.vial.shapes];
+  let mass = SHAPES.vial.mass, com = [0, 0.024, 0];
+  if (state !== 'vial') {
+    for (const s of SHAPES.adapter.shapes) out.push({ ...s, pos: [s.pos[0], s.pos[1] + SEAT_Y, s.pos[2]] });
+    mass += SHAPES.adapter.mass; com = [0.004, 0.034, 0];
+  }
+  if (state === 'vial+adapter+syringe') {
+    for (const s of syrShapes().shapes) if (s.type === 'cyl') out.push({ ...s, pos: [s.pos[0], s.pos[1] + SYR_ON_VIAL_Y, s.pos[2]] });
+    mass += syrShapes().mass; com = [0.003, 0.06, 0];
+  }
+  return { shapes: out, mass, com: new THREE.Vector3(...com) };
+}
+function applyShapes(item, def) {
+  const u = item.userData;
+  u.shapes = def.shapes; u.mass = def.mass; u.com = def.com.clone ? def.com.clone() : new THREE.Vector3(...def.com);
+}
+const shapeDef = k => ({ ...SHAPES[k], com: new THREE.Vector3(...SHAPES[k].com) });
+
+// ---------- cenário fixo: bandeja de saída (mesa de inox) e coletor de resíduo (dentro da capela) ----------
+const TRAY = { x: 0.92, z: 0.38, w: 0.2, d: 0.16, y: 0.75 };
+const WASTE = { x: 0.56, z: CZ - 0.66, w: 0.14, d: 0.14, h: 0.15, y: 0.578 };
+(function buildFixedProps() {
+  const tm = new THREE.MeshStandardMaterial({ color: 0x2f7fc1, roughness: 0.5 });
+  const tray = new THREE.Group(); tray.position.set(TRAY.x, TRAY.y, TRAY.z); scene.add(tray);
+  const base = new THREE.Mesh(new THREE.BoxGeometry(TRAY.w, 0.006, TRAY.d), tm); base.position.y = 0.003; tray.add(base);
+  for (const [x, z, w, d] of [[0, -TRAY.d / 2, TRAY.w, 0.006], [0, TRAY.d / 2, TRAY.w, 0.006], [-TRAY.w / 2, 0, 0.006, TRAY.d], [TRAY.w / 2, 0, 0.006, TRAY.d]]) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 0.03, d), tm); wall.position.set(x, 0.015, z); wall.castShadow = true; tray.add(wall);
+  }
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 0.025), canvasMat(240, 50, (c, W, H) => {
+    c.fillStyle = '#2f7fc1'; c.fillRect(0, 0, W, H); c.fillStyle = '#fff'; c.font = 'bold 30px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText('SAÍDA', W / 2, 36);
+  }));
+  sign.position.set(-TRAY.w / 2 - 0.0035, 0.016, 0); sign.rotation.y = -Math.PI / 2; tray.add(sign);
+  colliders.push(new THREE.Box3(new THREE.Vector3(TRAY.x - TRAY.w / 2, TRAY.y, TRAY.z - TRAY.d / 2), new THREE.Vector3(TRAY.x + TRAY.w / 2, TRAY.y + 0.006, TRAY.z + TRAY.d / 2)));
+  // coletor rígido de resíduo quimioterápico (aberto em cima)
+  const wm = new THREE.MeshStandardMaterial({ color: 0xe0901a, roughness: 0.5 });
+  const box = new THREE.Group(); box.position.set(WASTE.x, WASTE.y, WASTE.z); scene.add(box);
+  const t = 0.006, H = WASTE.h;
+  const parts = [[0, H / 2, -WASTE.d / 2 + t / 2, WASTE.w, H, t], [0, H / 2, WASTE.d / 2 - t / 2, WASTE.w, H, t],
+                 [-WASTE.w / 2 + t / 2, H / 2, 0, t, H, WASTE.d], [WASTE.w / 2 - t / 2, H / 2, 0, t, H, WASTE.d], [0, t / 2, 0, WASTE.w, t, WASTE.d]];
+  for (const [x, y, z, w, h, d] of parts) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wm); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; box.add(m);
+    colliders.push(new THREE.Box3(new THREE.Vector3(WASTE.x + x - w / 2, WASTE.y + y - h / 2, WASTE.z + z - d / 2), new THREE.Vector3(WASTE.x + x + w / 2, WASTE.y + y + h / 2, WASTE.z + z + d / 2)));
+  }
+  const lab = new THREE.Mesh(new THREE.PlaneGeometry(WASTE.w - 0.01, 0.07), canvasMat(280, 140, (c, W, H) => {
+    c.fillStyle = '#e0901a'; c.fillRect(0, 0, W, H); c.fillStyle = '#111';
+    c.font = 'bold 26px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText('RESÍDUO', W / 2, 44); c.fillText('QUIMIOTERÁPICO', W / 2, 80);
+    c.font = '18px system-ui, sans-serif'; c.fillText('descartar sem desmontar', W / 2, 114);
+  }));
+  lab.position.set(0, H * 0.6, WASTE.d / 2 + 0.001); box.add(lab);
+})();
+function overWaste(p, margin = 0) {
+  return Math.abs(p.x - WASTE.x) < WASTE.w / 2 - 0.008 + margin && Math.abs(p.z - WASTE.z) < WASTE.d / 2 - 0.008 + margin;
+}
+
+// ---------- limpeza da bancada (cobertura por células) ----------
+const CLEAN = { nx: 9, nz: 4, x0: table.minX + 0.04, x1: table.maxX - 0.04, z0: table.minZ + 0.05, z1: table.maxZ - 0.05 };
+let cleanCells = [], cleanCanvas = null, cleanTex = null, cleanOverlay = null;
+function cleanCellCenter(ix, iz) {
+  return new THREE.Vector3(CLEAN.x0 + (ix + 0.5) * (CLEAN.x1 - CLEAN.x0) / CLEAN.nx, table.top, CLEAN.z0 + (iz + 0.5) * (CLEAN.z1 - CLEAN.z0) / CLEAN.nz);
+}
+function resetCleaning() {
+  cleanCells = [];
+  for (let iz = 0; iz < CLEAN.nz; iz++) for (let ix = 0; ix < CLEAN.nx; ix++) {
+    const c = cleanCellCenter(ix, iz);
+    if (overWaste(c, 0.05)) continue;                                // embaixo do coletor não conta
+    cleanCells.push({ ix, iz, c, done: false });
+  }
+  if (!cleanOverlay) {
+    cleanCanvas = document.createElement('canvas'); cleanCanvas.width = 512; cleanCanvas.height = 256;
+    cleanTex = new THREE.CanvasTexture(cleanCanvas);
+    cleanOverlay = new THREE.Mesh(new THREE.PlaneGeometry(CLEAN.x1 - CLEAN.x0, CLEAN.z1 - CLEAN.z0),
+      new THREE.MeshBasicMaterial({ map: cleanTex, transparent: true, depthWrite: false }));
+    cleanOverlay.rotation.x = -Math.PI / 2;
+    cleanOverlay.position.set((CLEAN.x0 + CLEAN.x1) / 2, table.top + 0.0025, (CLEAN.z0 + CLEAN.z1) / 2);
+    cleanOverlay.renderOrder = 4; scene.add(cleanOverlay);
+  }
+  drawCleaning();
+}
+function cleanFraction() { return cleanCells.length ? cleanCells.filter(c => c.done).length / cleanCells.length : 0; }
+function drawCleaning() {
+  const g = cleanCanvas.getContext('2d'), W = 512, H = 256, cw = W / CLEAN.nx, ch = H / CLEAN.nz;
+  g.clearRect(0, 0, W, H);
+  const r = seeded(5);
+  for (const c of cleanCells) {
+    const x = c.ix * cw, y = c.iz * ch;
+    if (c.done) { g.fillStyle = 'rgba(120,220,255,0.10)'; g.fillRect(x + 2, y + 2, cw - 4, ch - 4); continue; }
+    g.fillStyle = 'rgba(150,140,120,0.16)'; g.fillRect(x, y, cw, ch);
+    for (let k = 0; k < 26; k++) { g.fillStyle = 'rgba(110,100,80,0.35)'; g.fillRect(x + r() * cw, y + r() * ch, 2 + r() * 3, 2 + r() * 3); }
+  }
+  cleanTex.needsUpdate = true;
+}
+function wipeAt(p) {                                  // gaze encostada na bancada limpa as células por onde passa
+  if (p.y - table.top > 0.03) return false;
+  let changed = false;
+  for (const c of cleanCells) if (!c.done && Math.hypot(c.c.x - p.x, c.c.z - p.z) < 0.09) { c.done = true; changed = true; }
+  if (changed) { drawCleaning(); SFX.clique(p); }
+  return changed;
+}
+
+// ---------- campo absorvente aberto ----------
+const PAD_W = 0.5, PAD_D = 0.36;
+function unfoldPad(item) {
+  const p = item.getWorldPosition(new THREE.Vector3());
+  detachFromPlay(item); item.parent?.remove(item);
+  const cx = THREE.MathUtils.clamp(p.x, table.minX + PAD_W / 2 + 0.03, WASTE.x - WASTE.w / 2 - PAD_W / 2 - 0.02);
+  const cz = THREE.MathUtils.clamp(p.z, table.minZ + PAD_D / 2 + 0.06, table.maxZ - PAD_D / 2 - 0.06);   // longe das grelhas
+  const sheet = new THREE.Mesh(new THREE.BoxGeometry(PAD_W, 0.002, PAD_D), padTexture());
+  sheet.position.set(cx, table.top + 0.001, cz); sheet.receiveShadow = true; scene.add(sheet);
+  P.padSheet = sheet; P.objs.push(sheet);
+  SFX.plastico(sheet.position, 0.5);
+}
+function padSheetNear(p) {
+  const s = P.padSheet; if (!s) return false;
+  return Math.abs(p.x - s.position.x) < PAD_W / 2 + 0.02 && Math.abs(p.z - s.position.z) < PAD_D / 2 + 0.02 && p.y - table.top < 0.09;
+}
+function pickPadSheet(hand) {                         // ao final: o campo é dobrado e vai para o descarte
+  const s = P.padSheet; P.padSheet = null; s.parent?.remove(s);
+  const pad = addProcItem(buildPadFolded(), 'Campo absorvente (usado)', s.position.clone().setY(table.top + 0.002), 'pad', 'plastico');
+  P.pad = pad;
+  if (hand === 'mouse') startMouseDragAt(pad); else holdItem(hand, pad);
+}
+
+// ---------- itens ----------
+function addProcItem(obj, name, pos, shapeKey, kind, extra = {}) {
+  const it = registerItem(obj, name, pos);
+  Object.assign(it.userData, { kind, ...extra });
+  applyShapes(it, shapeDef(shapeKey)); makeItemBody(it);
+  P.objs.push(it);
+  return it;
+}
 function spawnProcedure() {
-  const vial = registerItem(buildVial(), 'Frasco-ampola 10 mL', new THREE.Vector3(0.70, 0.75, -0.22));
-  Object.assign(vial.userData, { kind: 'vidro', grip: new THREE.Vector3(0, VIAL_GRIP_Y, 0), gripMode: 'frasco' });
-  applyShapes(vial, shapesFor('vial')); makeItemBody(vial);
-
-  const ad = registerItem(buildAdapter(), 'OncoSafe', new THREE.Vector3(0.70, 0.75 + 0.0135, 0.0));
-  Object.assign(ad.userData, { kind: 'plastico', grip: new THREE.Vector3(0, 0.012, 0), gripMode: 'vertical' });
-  applyShapes(ad, { ...SHAPES.adapter, com: new THREE.Vector3(...SHAPES.adapter.com) }); makeItemBody(ad);
-
-  const syr = registerItem(buildSyringe(), 'Seringa 10 mL', new THREE.Vector3(0.75, 0.75 + 0.0092, 0.27));
-  syr.quaternion.setFromEuler(new THREE.Euler(0, Math.PI / 2, Math.PI / 2, 'ZYX'));   // deitada, êmbolo para o jogador
-  syr.userData.home.q.copy(syr.quaternion);
-  Object.assign(syr.userData, { kind: 'plastico', grip: new THREE.Vector3(0, 0.045, 0), gripMode: 'vertical' });
-  applyShapes(syr, { ...SHAPES.syringe, com: new THREE.Vector3(...SHAPES.syringe.com) }); makeItemBody(syr);
-
-  // o luer (branco) acende conforme a seringa é girada
+  Object.assign(P, { step: 0, objs: [], hint: '', hintT: null, twist: null, plunger: null, allDone: false, inside: 0,
+    adapterOn: false, sadOn: false, syrOn: null, stroke: 0, syr: { liq: 0, air: 0 }, vialLiq: VIAL_ML, balloon: 0,
+    bubbleLeft: 0, bagMl: BOLSA_ML, purgeLeft: PURGA_S, waitLeft: AGUARDA_S, septoT: 0, invT: 0, vidroT: 0,
+    padSheet: null, labelOn: false, discarded: new Set(), stand: false, cleanPass: 1 });
+  const T = 0.75;
+  P.vial = addProcItem(buildVial(), 'Frasco-ampola 10 mL', new THREE.Vector3(0.55, T, -0.30), 'vial', 'vidro',
+    { grip: new THREE.Vector3(0, VIAL_GRIP_Y, 0), gripMode: 'frasco' });
+  P.adapter = addProcItem(buildAdapter(), 'OncoSafe', new THREE.Vector3(0.80, T + 0.0135, -0.30), 'adapter', 'plastico',
+    { grip: new THREE.Vector3(0, 0.012, 0), gripMode: 'vertical' });
+  P.sad = addProcItem(buildSyringeAdapter(), 'Adaptador de seringa', new THREE.Vector3(0.55, T + SA_LEN + 0.001, -0.14), 'sadapter', 'plastico',
+    { grip: new THREE.Vector3(0, -SA_LEN / 2, 0), gripMode: 'vertical' });
+  P.syringe = addProcItem(buildSyringe(), 'Seringa 5 mL', new THREE.Vector3(0.62, T + 0.016, 0.05), 'syringe', 'plastico',
+    { grip: new THREE.Vector3(0, 0.045, 0), gripMode: 'vertical' });
+  P.syringe.quaternion.setFromEuler(new THREE.Euler(0, Math.PI / 2, Math.PI / 2, 'ZYX'));   // deitada
+  P.syringe.userData.home.q.copy(P.syringe.quaternion); syncBodyFromItem(P.syringe);
+  P.bag = addProcItem(buildBag(), 'Bolsa SF 0,9% 100 mL', new THREE.Vector3(0.82, T + 0.001, 0.13), 'bag', 'plastico',
+    { grip: new THREE.Vector3(0, 0.01, 0), gripMode: 'palma' });
+  P.gauze = addProcItem(buildGauze(), 'Gaze com álcool 70%', new THREE.Vector3(0.56, T + 0.001, 0.22), 'gauze', 'plastico',
+    { grip: new THREE.Vector3(0, 0.004, 0), gripMode: 'palma' });
+  P.label = addProcItem(buildLabel(), 'Etiqueta da bolsa', new THREE.Vector3(0.53, T + 0.001, 0.37), 'label', 'plastico');
+  P.pad = addProcItem(buildPadFolded(), 'Campo absorvente', new THREE.Vector3(0.70, T + 0.001, 0.40), 'pad', 'plastico');
+  const ad = P.adapter;
   ad.traverse(o => { if (o.isMesh && o.material.color && o.material.color.getHex() === 0xf4f4f1) ad.userData.luerMesh = o; });
-  Object.assign(P, { vial, adapter: ad, syringe: syr, adapterOn: false, syringeOn: false, stroke: 0, twist: null, plunger: null,
-    done: [false, false, false, false, false], allDone: false, inside: 0 });
-  setStroke(0);
+  if (capelaOn) P.purgeLeft = PURGA_S;
+  resetCleaning();
+  updateVolumes();
   makeGhost();
   procPanelKey = '';
 }
@@ -1967,47 +2238,88 @@ function rebuildBody(item, def) {
   if (u.heldBy !== null) setHeldPhysics(item, true); else u.body.wakeUp();
 }
 function resetProcedure() {
-  for (const it of [P.vial, P.adapter, P.syringe]) {
-    if (!it) continue;
-    detachFromPlay(it);
-    it.parent?.remove(it);
-  }
+  if (P.twist) cancelTwist();
+  for (const it of P.objs) { if (items.includes(it) || it.userData?.body) detachFromPlay(it); it.parent?.remove(it); }
+  P.stand = false;
   for (let i = 0; i < 2; i++) if (held[i] && !items.includes(held[i])) held[i] = null;
   spawnProcedure();
 }
-// volumes e balão a partir do curso do êmbolo
-function syringeML() { return Math.min(VIAL_ML, P.stroke * ML_PER_M); }
+function setHint(t, ms = 2500) { P.hintT = { t, until: performance.now() + ms }; }
+
+// ---------- volumes: seringa (líquido/ar), frasco, balão e bolsa ----------
+function syringeML() { return P.syr.liq + P.syr.air; }
+function vialInverted() { return P.vial && vialFrame().up.y < -0.5; }
 function setStroke(s) {
-  P.stroke = THREE.MathUtils.clamp(s, 0, STROKE_MAX);
-  const sp = P.syringe.userData.parts || P.syringe.children[0].userData.parts;
-  const sparts = P.syringe.children[0].userData.parts;
-  sparts.rod.position.y = P.stroke;
-  sparts.liquid.scale.y = Math.max(1e-4, P.stroke);
-  const vml = VIAL_ML - syringeML();
-  P.vial.children[0].userData.parts.liquid.scale.y = Math.max(1e-4, (0.035 - 0.0012) * vml / VIAL_ML);
-  const frac = syringeML() / VIAL_ML, balao = P.adapter.children[0].userData.parts.balao;
-  const f = BALAO_MURCHA_AO_ASPIRAR ? 1 - 0.75 * frac : 0.25 + 0.75 * frac;
-  balao.scale.set(Math.max(0.2, f), 0.9 + 0.1 * f, 0.9 + 0.1 * f);
+  s = THREE.MathUtils.clamp(s, 0, STROKE_MAX);
+  let d = (s - P.stroke) * ML_PER_M;
+  const ctx = P.syrOn, inv = ctx === 'vial' && vialInverted();
+  if (d > 0) {                                        // puxando o êmbolo
+    if (ctx === 'bag') d = 0;                         // não aspira da bolsa
+    else if (ctx === 'vial') {
+      if (inv) {
+        const a = Math.min(d, P.bubbleLeft); P.bubbleLeft -= a; P.syr.air += a;
+        const l = Math.min(d - a, P.vialLiq); P.vialLiq -= l; P.syr.liq += l; P.syr.air += d - a - l;
+      } else P.syr.air += d;                          // frasco em pé: puxa ar do frasco
+      P.balloon -= d;                                 // o ar do balão repõe o volume retirado: o balão murcha
+    } else P.syr.air += d;                            // fora do sistema: ar filtrado da capela
+  } else if (d < 0) {                                 // empurrando o êmbolo
+    let r = -d;
+    // invertido, o ar fica perto do bico e volta primeiro; em pé ou na bolsa, sai primeiro o líquido
+    const order = inv ? ['air', 'liq'] : ['liq', 'air'];
+    for (const k of order) {
+      const m = Math.min(r, P.syr[k]); P.syr[k] -= m; r -= m;
+      if (ctx === 'vial') { if (k === 'liq') P.vialLiq += m; P.balloon += m; }   // o que entra no frasco empurra ar para o balão: enche
+      else if (ctx === 'bag' && k === 'liq') P.bagMl += m;
+    }
+  }
+  P.syr.liq = Math.max(0, P.syr.liq); P.syr.air = Math.max(0, P.syr.air);
+  P.stroke = syringeML() / ML_PER_M;
+  updateVolumes();
 }
+function updateVolumes() {
+  if (!P.syringe) return;
+  const sp = P.syringe.children[0].userData.parts;
+  sp.rod.position.y = P.stroke;
+  // líquido na seringa: com o bico para cima o ar fica no bico (embaixo, no espaço da seringa)
+  P.syringe.updateMatrixWorld(true);
+  const tipUp = new THREE.Vector3(0, 1, 0).applyQuaternion(P.syringe.getWorldQuaternion(new THREE.Quaternion())).y < 0;
+  const lh = P.syr.liq / ML_PER_M, ah = P.syr.air / ML_PER_M;
+  sp.liquid.scale.y = Math.max(1e-4, lh);
+  sp.liquid.position.y = sp.B0 + (tipUp ? ah : 0);
+  sp.liquid.visible = P.syr.liq > 0.01;
+  // frasco: o líquido escorre para o lado de baixo
+  const vp = P.vial.children[0].userData.parts, vh = (0.035 - 0.0012) * Math.max(0, P.vialLiq) / VIAL_ML;
+  vp.liquid.scale.y = Math.max(1e-4, vh);
+  vp.liquid.position.y = vialInverted() ? 0.044 - vh : 0.0012;
+  // balão: vazio no início, enche quando entra ar/volume no frasco e murcha quando sai
+  const b = THREE.MathUtils.clamp(P.balloon / ALVO_ML, 0, 1.3), balao = P.adapter.children[0].userData.parts.balao;
+  balao.scale.set(0.22 + 0.9 * b, 0.82 + 0.18 * Math.min(1, b), 0.82 + 0.18 * Math.min(1, b));
+  // bolsa
+  const bl = P.bag?.children[0]?.userData.parts?.liquid; if (bl) bl.scale.y = 1 + (P.bagMl - BOLSA_ML) * 0.012;
+}
+
+// ---------- utilidades de pose ----------
 function setWorldPose(obj, pos, quat) {
   obj.parent.updateMatrixWorld(true);
   _m42.compose(pos, quat, _sc.set(1, 1, 1)).premultiply(new THREE.Matrix4().copy(obj.parent.matrixWorld).invert());
   _m42.decompose(obj.position, obj.quaternion, _sc);
 }
-function vialFrame() {
-  P.vial.updateMatrixWorld(true);
-  const q = P.vial.getWorldQuaternion(new THREE.Quaternion());
+function frameOf(obj) {
+  obj.updateMatrixWorld(true);
+  const q = obj.getWorldQuaternion(new THREE.Quaternion());
   return { q, up: new THREE.Vector3(0, 1, 0).applyQuaternion(q) };
 }
+function vialFrame() { return frameOf(P.vial); }
 function handWorld(i) { const a = anchorFor(i); return { p: a.getWorldPosition(new THREE.Vector3()), q: a.getWorldQuaternion(new THREE.Quaternion()) }; }
-// giro de q1 em relação a q0, em torno do eixo
 function twistAbout(q0, q1, axis) {
   _qa2.copy(q1).multiply(_qb2.copy(q0).invert());
   if (_qa2.w < 0) { _qa2.x *= -1; _qa2.y *= -1; _qa2.z *= -1; _qa2.w *= -1; }
   return 2 * Math.atan2(_qa2.x * axis.x + _qa2.y * axis.y + _qa2.z * axis.z, _qa2.w);
 }
+function otherHandHolds(item, i) { const h = item.userData.heldBy; return typeof h === 'number' && h !== i; }
+function isHeldNum(item) { return typeof item?.userData.heldBy === 'number'; }
 
-// --- 1) adaptador no frasco: alinhado e pressionado até travar ---
+// --- montagem: OncoSafe no frasco (alinhado e pressionado até travar) ---
 function adapterAlignment() {
   const { up } = vialFrame();
   const top = P.vial.localToWorld(_pa.set(0, SEAT_Y, 0));
@@ -2028,97 +2340,6 @@ function lockAdapter() {
   SFX.trava(v.getWorldPosition(new THREE.Vector3()));
   for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
 }
-
-// --- 2) seringa no luer: alinhar e girar ---
-function luerWorld() { return P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y + LUER_TOP, 0)); }
-function syringeAlignment(lateralOnlyXZ) {
-  const { up } = vialFrame(), luer = luerWorld();
-  P.syringe.updateMatrixWorld(true);
-  const tip = P.syringe.localToWorld(new THREE.Vector3());
-  const sUp = new THREE.Vector3(0, 1, 0).applyQuaternion(P.syringe.getWorldQuaternion(new THREE.Quaternion()));
-  if (lateralOnlyXZ) return { ok: Math.hypot(tip.x - luer.x, tip.z - luer.z) < 0.03 && up.y > 0.85 };
-  const d = tip.sub(luer), axial = d.dot(up), lateral = d.addScaledVector(up, -axial).length();
-  return { ok: sUp.dot(up) > 0.85 && lateral < 0.014 && axial > -0.006 && axial < 0.025 };
-}
-function placeSyringeOnLuer(angle, progress) {
-  const { q } = vialFrame();
-  const pos = P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y + LUER_TOP - SYR_IN * progress, 0));
-  setWorldPose(P.syringe, pos, q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(YAXIS, angle)));
-}
-function connectSyringe(angle) {
-  const s = P.syringe;
-  detachFromPlay(s);
-  P.vial.add(s);
-  s.position.set(0, SEAT_Y + LUER_TOP - SYR_IN, 0);
-  s.quaternion.setFromAxisAngle(YAXIS, angle);
-  rebuildBody(P.vial, shapesFor('vial+adapter+syringe'));
-  P.syringeOn = true; P.twist = null; controls.enabled = true;
-  SFX.trava(luerWorld());
-  for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
-}
-function detachSyringe(hand) {
-  const s = P.syringe;
-  scene.attach(s);
-  items.push(s);
-  applyShapes(s, { ...SHAPES.syringe, com: new THREE.Vector3(...SHAPES.syringe.com) });
-  makeItemBody(s);
-  rebuildBody(P.vial, shapesFor('vial+adapter'));
-  P.syringeOn = false; P.twist = null;
-  SFX.trava(s.getWorldPosition(new THREE.Vector3()));
-  if (hand === 'mouse') { controls.enabled = true; startMouseDragAt(s); }
-  else holdItem(hand, s);
-}
-function syringePoints() {
-  const sp = P.syringe.children[0].userData.parts;
-  return { thumb: P.syringe.localToWorld(new THREE.Vector3(0, sp.thumbY + P.stroke, 0)),
-           barrel: P.syringe.localToWorld(new THREE.Vector3(0, 0.045, 0)) };
-}
-// tenta uma ação do procedimento ao fechar a mão / apertar o gatilho (retorna true se usou)
-function otherHandHolds(item, i) { const h = item.userData.heldBy; return typeof h === 'number' && h !== i; }
-function procGrab(i, p) {
-  if (!P.syringeOn) return false;
-  if (!otherHandHolds(P.vial, i)) {                // como na vida real: o conjunto fica firme na outra mão
-    const sp0 = syringePoints();
-    if (p.distanceTo(sp0.thumb) < 0.045 || p.distanceTo(sp0.barrel) < 0.05) P.hintT = { t: 'Segure o frasco com a outra mão primeiro.', until: performance.now() + 2500 };
-    return false;
-  }
-  const sp = syringePoints();
-  if (p.distanceTo(sp.thumb) < 0.045) {            // puxar o êmbolo
-    const ax = new THREE.Vector3(0, 1, 0).applyQuaternion(P.syringe.getWorldQuaternion(new THREE.Quaternion()));
-    P.plunger = { hand: i, start: P.stroke, proj0: p.clone().sub(P.syringe.getWorldPosition(new THREE.Vector3())).dot(ax) };
-    gloveFlash[i] = 1; pulse(i, 0.5, 30); return true;
-  }
-  if (p.distanceTo(sp.barrel) < 0.05) {            // girar para desconectar
-    const h = handWorld(i);
-    const o = P.vial.userData.heldBy, ho = handWorld(o);
-    P.twist = { mode: 'disconnect', hand: i, other: o, lastQo: ho.q, angle: 0, lastQ: h.q, start: h.p, baseQ: P.syringe.quaternion.clone(), lastClick: 0 };
-    gloveFlash[i] = 1; pulse(i, 0.5, 30); return true;
-  }
-  return false;
-}
-function procRelease(i) {
-  if (P.plunger && P.plunger.hand === i) P.plunger = null;
-  if (P.twist && P.twist.hand === i) cancelTwist();
-}
-function cancelTwist() {
-  const t = P.twist; if (!t) return;
-  if (t.mode === 'disconnect') P.syringe.quaternion.copy(t.baseQ);
-  if (t.mode === 'connect' && t.hand !== 'mouse' && t.keepPos) { P.syringe.position.copy(t.keepPos); P.syringe.quaternion.copy(t.keepQ); }
-  if (t.mode === 'connect' && t.hand === 'mouse' && dragging !== P.syringe) {   // estava pré-encaixada esperando o giro: cai
-    const u = P.syringe.userData; u.heldBy = null; setHeldPhysics(P.syringe, false); syncBodyFromItem(P.syringe);
-  }
-  P.twist = null; controls.enabled = true;
-  setLuerGlow(0);
-}
-function setLuerGlow(k) {
-  const m = P.adapter?.userData.luerMesh?.material; if (!m) return;
-  m.emissive.setHex(0x22ff77); m.emissiveIntensity = k * 0.8;
-}
-function twistClicks(t) {                    // "catraca" a cada 15° girados
-  const n = Math.floor(Math.abs(t.angle) / THREE.MathUtils.degToRad(15));
-  if (n > t.lastClick) { t.lastClick = n; SFX.clique(luerWorld()); if (typeof t.hand === 'number') pulse(t.hand, 0.3, 15); }
-}
-
 // "fantasma" verde mostrando onde o OncoSafe assenta no frasco
 let ghost = null;
 function makeGhost() {
@@ -2131,211 +2352,753 @@ function makeGhost() {
 function setGhost(on) {
   if (!ghost) return;
   ghost.visible = on;
-  if (on) { P.vial.updateMatrixWorld(true); setWorldPose(ghost, P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y, 0)), P.vial.getWorldQuaternion(new THREE.Quaternion())); }
+  if (on) setWorldPose(ghost, P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y, 0)), P.vial.getWorldQuaternion(new THREE.Quaternion()));
 }
+
+// --- seringa: pontos de conexão ---
+function syrTipWorld() { return P.syringe.localToWorld(new THREE.Vector3(0, P.sadOn ? TIP_Y : 0, 0)); }
+function syrUp() { return frameOf(P.syringe).up; }
+function luerWorld() { return P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y + LUER_TOP, 0)); }
+function portWorld() {
+  const bp = P.bag.children[0].userData.parts;
+  return { p: P.bag.localToWorld(bp.port.clone()), axis: bp.portAxis.clone().applyQuaternion(frameOf(P.bag).q) };
+}
+function alignTo(target, axis) {                     // ponta da seringa x alvo (axis aponta para fora do alvo)
+  P.syringe.updateMatrixWorld(true);
+  const d = syrTipWorld().sub(target), axial = d.dot(axis), lateral = d.addScaledVector(axis, -axial).length();
+  return { cos: syrUp().dot(axis), axial, lateral, ok: syrUp().dot(axis) > 0.85 && lateral < 0.014 && axial > -0.006 && axial < 0.03 };
+}
+// seringa no adaptador de seringa: encaixa e gira ¼ (adaptador numa mão, seringa na outra)
+function sadTopWorld() { return P.sad.localToWorld(new THREE.Vector3()); }
+function placeSyringeOnSad(angle, progress) {        // o bico entra no luer do adaptador conforme gira
+  const { q, up } = frameOf(P.sad);
+  const pos = sadTopWorld().addScaledVector(up, -SYR_IN * progress);
+  setWorldPose(P.syringe, pos, q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(YAXIS, angle)));
+}
+function attachSad() {
+  const s = P.syringe, a = P.sad;
+  const sadHand = a.userData.heldBy;
+  detachFromPlay(a);
+  s.add(a); a.position.set(0, SYR_IN, 0); a.quaternion.identity();
+  P.sadOn = true; P.twist = null; controls.enabled = true;
+  rebuildBody(s, syrShapes());
+  SFX.trava(s.getWorldPosition(new THREE.Vector3()));
+  for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
+  if (typeof sadHand === 'number') { held[sadHand] = null; }
+}
+// seringa (com adaptador) no OncoSafe: empurra até o clique
+function connectToVial() {
+  const s = P.syringe;
+  detachFromPlay(s);
+  P.vial.add(s); s.position.set(0, SYR_ON_VIAL_Y, 0); s.quaternion.identity();
+  rebuildBody(P.vial, shapesFor('vial+adapter+syringe'));
+  P.syrOn = 'vial'; P.twist = null; controls.enabled = true;
+  if (!renderer.xr.isPresenting && P.vial.userData.heldBy === null) standVial('up');   // PC: conjunto preso no suporte
+  SFX.trava(luerWorld()); for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
+}
+function layDownSyringe(nearP) {                     // PC: a seringa solta fica deitada ao lado
+  const s = P.syringe;
+  s.quaternion.setFromEuler(new THREE.Euler(0, Math.PI / 2, Math.PI / 2, 'ZYX'));
+  s.position.set(THREE.MathUtils.clamp(nearP.x + 0.12, table.minX + 0.1, table.maxX - 0.1), table.top + 0.017, THREE.MathUtils.clamp(nearP.z + 0.06, table.minZ + 0.08, table.maxZ - 0.08));
+  syncBodyFromItem(s);
+}
+function detachFromVial(hand) {
+  const s = P.syringe;
+  scene.attach(s); items.push(s);
+  applyShapes(s, syrShapes()); makeItemBody(s);
+  rebuildBody(P.vial, shapesFor('vial+adapter'));
+  P.syrOn = null; P.twist = null;
+  SFX.trava(s.getWorldPosition(new THREE.Vector3()));
+  if (hand === 'mouse') { controls.enabled = true; layDownSyringe(P.vial.getWorldPosition(new THREE.Vector3())); } else if (typeof hand === 'number') holdItem(hand, s);
+}
+// seringa na bolsa: empurra até o clique; desconecta puxando
+function connectToBag() {
+  const s = P.syringe, bp = P.bag.children[0].userData.parts;
+  detachFromPlay(s);
+  P.bag.add(s);
+  s.quaternion.setFromUnitVectors(YAXIS, bp.portAxis);
+  s.position.copy(bp.port).addScaledVector(bp.portAxis, -CON_IN - TIP_Y);
+  rebuildBody(P.bag, { ...shapeDef('bag'), shapes: [...SHAPES.bag.shapes, { type: 'cyl', r: 0.007, h: 0.1, pos: [bp.port.x + 0.05, bp.port.y, bp.port.z], axis: 'x' }] });
+  P.syrOn = 'bag';
+  SFX.trava(portWorld().p); for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
+}
+function detachFromBag(hand) {
+  const s = P.syringe;
+  scene.attach(s); items.push(s);
+  applyShapes(s, syrShapes()); makeItemBody(s);
+  rebuildBody(P.bag, shapeDef('bag'));
+  P.syrOn = null;
+  SFX.trava(s.getWorldPosition(new THREE.Vector3()));
+  if (hand === 'mouse') layDownSyringe(P.bag.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(-0.1, 0, 0.1))); else if (typeof hand === 'number') holdItem(hand, s);
+}
+function attachLabel() {
+  const l = P.label;
+  detachFromPlay(l);
+  P.bag.add(l); l.position.set(-0.02, 0.0205, 0); l.quaternion.identity();
+  P.labelOn = true; SFX.clique(l.getWorldPosition(new THREE.Vector3()));
+}
+function discard(item) {
+  detachFromPlay(item);
+  P.discarded.add(item);
+  SFX.plastico(item.getWorldPosition(new THREE.Vector3()), 0.6);
+}
+
+// --- zonas de pega na seringa (mão livre) ---
+// "base" que segura a seringa: o frasco (conectada), a bolsa (apoiada na bancada) ou a própria seringa (na outra mão)
+function syringeBaseOK(i) {
+  if (P.syrOn === 'vial') return otherHandHolds(P.vial, i) || P.stand;
+  if (P.syrOn === 'bag') return true;
+  return P.sadOn && otherHandHolds(P.syringe, i);
+}
+function syringeZone(i, p) {
+  if (!P.syringe || !syringeBaseOK(i)) return null;
+  const parts = P.syringe.children[0].userData.parts;
+  P.syringe.updateMatrixWorld(true);
+  const lp = P.syringe.worldToLocal(p.clone()), r = Math.hypot(lp.x, lp.z);
+  const top = parts.thumbY + P.stroke;
+  if (r > 0.075 || lp.y < -0.04 || lp.y > top + 0.07) return null;
+  const upper = lp.y > parts.thumbY - 0.02 + P.stroke * 0.5;
+  if (!P.syrOn) return upper ? 'plunger' : null;                       // seringa na outra mão: só o êmbolo
+  if (P.syrOn === 'vial') return reached('desconectar') && !upper ? 'twist' : 'plunger';
+  if (P.syrOn === 'bag') return reached('bolsa_desc') && !upper ? 'pull' : 'plunger';
+  return null;
+}
+let plungerGlow = false;
+function setPlungerGlow(on) {
+  if (on === plungerGlow || !P.syringe) return; plungerGlow = on;
+  P.syringe.children[0].userData.parts.rod.traverse(o => { if (o.isMesh && o.material.emissive) { o.material.emissive.setHex(0x55d6ff); o.material.emissiveIntensity = on ? 0.6 : 0; } });
+}
+function startPlunger(hand, p) {
+  const ax = syrUp();
+  P.plunger = { hand, start: P.stroke, proj0: p.clone().sub(P.syringe.getWorldPosition(new THREE.Vector3())).dot(ax) };
+}
+// ação do procedimento ao fechar a mão / apertar o gatilho (true = usou)
+function procGrab(i, p) {
+  if (curStep() === 'descartar' && P.padSheet && padSheetNear(p) && nearestItem(p, 0.05, null, i) === null) { pickPadSheet(i); return true; }
+  const zone = syringeZone(i, p);
+  if (zone === 'plunger') { startPlunger(i, p); gloveFlash[i] = 1; pulse(i, 0.5, 30); setPlungerGlow(false); return true; }
+  if (zone === 'twist') {
+    const h = handWorld(i), o = P.vial.userData.heldBy, ho = typeof o === 'number' ? handWorld(o) : null;
+    P.twist = { mode: 'disconnect', hand: i, other: o, lastQo: ho?.q, angle: 0, lastQ: h.q, start: h.p, baseQ: P.syringe.quaternion.clone(), lastClick: 0 };
+    gloveFlash[i] = 1; pulse(i, 0.5, 30); return true;
+  }
+  if (zone === 'pull') { detachFromBag(i); return true; }
+  if (P.syrOn === 'vial' && !syringeBaseOK(i)) {
+    const lp = P.syringe.worldToLocal(p.clone());
+    if (Math.hypot(lp.x, lp.z) < 0.06 && lp.y > -0.02 && lp.y < 0.16) setHint('Segure o frasco com a outra mão primeiro.');
+  }
+  return false;
+}
+function procRelease(i) {
+  if (P.plunger && P.plunger.hand === i) P.plunger = null;
+  if (P.twist && P.twist.hand === i) cancelTwist();
+}
+function cancelTwist() {
+  const t = P.twist; if (!t) return;
+  if (t.mode === 'disconnect') P.syringe.quaternion.copy(t.baseQ);
+  if (t.mode === 'sadapt' && t.hand !== 'mouse' && t.keepPos) { P.syringe.position.copy(t.keepPos); P.syringe.quaternion.copy(t.keepQ); }
+  if (t.mode === 'sadapt' && t.hand === 'mouse' && dragging !== P.syringe) {
+    const u = P.syringe.userData; u.heldBy = null; setHeldPhysics(P.syringe, false); syncBodyFromItem(P.syringe);
+  }
+  P.twist = null; controls.enabled = true;
+  setLuerGlow(0);
+}
+function setLuerGlow(k) {
+  const m = P.adapter?.userData.luerMesh?.material; if (!m) return;
+  m.emissive.setHex(0x22ff77); m.emissiveIntensity = k * 0.8;
+}
+function twistClicks(t, pos) {                      // "catraca" a cada 15° girados
+  const n = Math.floor(Math.abs(t.angle) / THREE.MathUtils.degToRad(15));
+  if (n > t.lastClick) { t.lastClick = n; SFX.clique(pos); if (typeof t.hand === 'number') pulse(t.hand, 0.3, 15); }
+}
+
+// ---------- PC: inverter o conjunto num suporte ----------
+const invBtn = document.getElementById('invBtn');
+// o conjunto fica preso num suporte (em pé ou invertido) enquanto a seringa está conectada, para não tombar
+function standVial(mode) {
+  const v = P.vial, u = v.userData;
+  if (dragging === v) { dragging = null; controls.enabled = true; }
+  const p = v.getWorldPosition(new THREE.Vector3());
+  const x = THREE.MathUtils.clamp(p.x, table.minX + 0.1, table.maxX - 0.1), z = THREE.MathUtils.clamp(p.z, table.minZ + 0.1, table.maxZ - 0.1);
+  P.stand = mode; u.heldBy = 'stand'; setHeldPhysics(v, true);
+  if (mode === 'down') { v.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI); v.position.set(x, table.top + 0.3, z); }
+  else { v.quaternion.identity(); v.position.set(x, table.top + 0.002, z); }
+  updateVolumes();
+}
+function releaseStand() {
+  const v = P.vial, u = v.userData;
+  if (!P.stand) return;
+  const p = v.getWorldPosition(new THREE.Vector3());
+  P.stand = false; u.heldBy = null;
+  v.quaternion.identity(); v.position.set(p.x, table.top + 0.002, p.z);
+  setHeldPhysics(v, false); syncBodyFromItem(v);
+  updateVolumes();
+}
+function toggleStand() {
+  if (!P.adapterOn || renderer.xr.isPresenting || typeof P.vial.userData.heldBy === 'number') return;
+  if (P.stand === 'down') { if (P.syrOn) standVial('up'); else releaseStand(); }
+  else standVial('down');
+}
+invBtn.onclick = toggleStand;
+addEventListener('keydown', e => { if ((e.key === 'i' || e.key === 'I') && !renderer.xr.isPresenting) toggleStand(); });
+
+// ---------- atualização por quadro ----------
+function heldOrMouse(item) { const h = item?.userData.heldBy; return h !== null && h !== undefined; }
+function itemRestingIn(item, test) { return item && items.includes(item) && !heldOrMouse(item) && test(item.getWorldPosition(new THREE.Vector3())); }
 function updateProcedure(dt) {
   if (!P.vial) return;
+  const id = curStep();
   P.hint = P.hintT && performance.now() < P.hintT.until ? P.hintT.t : '';
-  // adaptador: guia e trava (mão ou controle)
+
+  // capela: purga e espera final
+  if (capelaOn && P.purgeLeft > 0) P.purgeLeft = Math.max(0, P.purgeLeft - dt);
+  if (!capelaOn && id === 'ligar') P.purgeLeft = PURGA_S;
+
+  // gaze: limpar bancada e septo
+  const gz = P.gauze && items.includes(P.gauze) ? P.gauze.getWorldPosition(new THREE.Vector3()) : null;
+  if (P.gauze?.userData.body) P.gauze.userData.body.collisionResponse = !heldOrMouse(P.gauze);   // gaze na mão é macia: não empurra os itens
+  if (gz && (id === 'limpar1' || id === 'limpar2')) wipeAt(gz);
+  if (gz && id === 'septo') {
+    const top = P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y, 0));
+    if (gz.distanceTo(top) < 0.03 && (heldOrMouse(P.gauze))) { P.septoT += dt; if (Math.floor(P.septoT * 4) !== Math.floor((P.septoT - dt) * 4)) SFX.clique(top); }
+  }
+  if (cleanOverlay) cleanOverlay.visible = (id === 'limpar1' || id === 'limpar2') || (!reached('limpar1') );
+
+  // campo absorvente: abre ao ser solto na bancada da capela
+  if (reached('campo') && P.pad && !P.padSheet && !P.discarded.has(P.pad) && itemRestingIn(P.pad, p => insideSurface(p)) && !reached('descartar')) unfoldPad(P.pad);
+
+  // OncoSafe no frasco (só a partir do passo de montagem)
   if (!P.adapterOn) {
     const al = adapterAlignment();
-    const heldAny = P.adapter.userData.heldBy !== null || P.vial.userData.heldBy !== null;
+    const ha = P.adapter.userData.heldBy, hv = P.vial.userData.heldBy;
+    const heldAny = ha !== null || hv !== null;
     const near = al.cos > 0.9 && al.lateral < 0.014 && al.axial > -0.012 && al.axial < 0.035;
     for (const b of [P.adapter.userData.body, P.vial.userData.body]) if (b) b.collisionResponse = !(near && heldAny);
     const vm = P.vial.children[0].children.find(m => m.material?.metalness === 1)?.material;
-    if (vm) { vm.emissive.setHex(0x22ff77); vm.emissiveIntensity = near && heldAny ? 0.6 : 0; }
-    const ha = P.adapter.userData.heldBy, hv = P.vial.userData.heldBy;
-    const twoHands = typeof ha === 'number' && typeof hv === 'number' && ha !== hv;     // frasco numa mão, OncoSafe na outra
-    if (near && twoHands && al.axial < 0.003) { if (vm) vm.emissiveIntensity = 0; setGhost(false); lockAdapter(); }
+    const twoHands = typeof ha === 'number' && typeof hv === 'number' && ha !== hv;
+    const close = al.lateral < 0.10 && Math.abs(al.axial) < 0.12;
+    if (close && !reached('montagem') && (typeof ha === 'number' || ha === 'mouse')) setHint(id === 'septo' ? 'Antes de encaixar, desinfete o septo com a gaze.' : 'Ainda não: siga o passo atual do painel.', 300);
+    else if (near && twoHands && al.axial < 0.003) { if (vm) vm.emissiveIntensity = 0; setGhost(false); lockAdapter(); }
     else {
-      const close = al.lateral < 0.10 && Math.abs(al.axial) < 0.12;
-      setGhost(close && (twoHands || ha === 'mouse'));
-      if (close && typeof (typeof ha === 'number' ? ha : hv) === 'number' && !twoHands)
-        P.hint = 'Use as duas mãos: o frasco numa mão e o OncoSafe na outra.';
+      if (vm) { vm.emissive.setHex(0x22ff77); vm.emissiveIntensity = near && heldAny && reached('montagem') ? 0.6 : 0; }
+      setGhost(close && reached('montagem') && (twoHands || ha === 'mouse'));
+      if (close && reached('montagem') && !twoHands && typeof (typeof ha === 'number' ? ha : hv) === 'number') P.hint = 'Use as duas mãos: o frasco numa mão e o OncoSafe na outra.';
       else if (near && twoHands) P.hint = 'Pressione o OncoSafe para baixo até travar.';
     }
   }
-  // seringa pré-encaixada no luer não deve empurrar o frasco
-  const sb = P.syringe.userData.body;
-  if (sb) sb.collisionResponse = !(P.twist && P.twist.mode === 'connect');
-  // seringa: encaixe + giro para conectar (VR)
-  const t = P.twist;
-  if (!P.syringeOn && P.adapterOn && !t) {
-    const h = P.syringe.userData.heldBy;
-    if (typeof h === 'number' && syringeAlignment(false).ok) {
-      if (!otherHandHolds(P.vial, h)) P.hint = 'Segure o frasco com a outra mão para rosquear a seringa.';
+
+  // seringa no adaptador de seringa (gira ¼), conexão no OncoSafe e na bolsa (empurra até o clique)
+  const sh = P.syringe.userData.heldBy;
+  const sb = P.syringe.userData.body; if (sb) sb.collisionResponse = !(P.twist && P.twist.mode === 'sadapt');
+  if (!P.sadOn && P.sad && !P.twist && typeof sh === 'number') {
+    const { up } = frameOf(P.sad), al = alignTo(sadTopWorld(), up);
+    if (al.ok) {
+      if (!reached('sadapt')) setHint('Ainda não: siga o passo atual do painel.', 300);
+      else if (!otherHandHolds(P.sad, sh)) P.hint = 'Segure o adaptador de seringa com a outra mão.';
       else {
-        const hw = handWorld(h), o = P.vial.userData.heldBy;
-        P.twist = { mode: 'connect', hand: h, other: o, lastQo: handWorld(o).q, angle: 0, lastQ: hw.q, start: hw.p, keepPos: P.syringe.position.clone(), keepQ: P.syringe.quaternion.clone(), lastClick: 0 };
+        const hw = handWorld(sh), o = P.sad.userData.heldBy;
+        P.twist = { mode: 'sadapt', hand: sh, other: o, lastQo: handWorld(o).q, angle: 0, lastQ: hw.q, start: hw.p, keepPos: P.syringe.position.clone(), keepQ: P.syringe.quaternion.clone(), lastClick: 0 };
       }
     }
   }
+  if (P.sadOn && !P.syrOn && typeof sh === 'number') {
+    if (P.adapterOn && !reached('desconectar') && !P.discarded.has(P.vial)) {
+      const al = alignTo(luerWorld(), vialFrame().up);
+      if (al.ok) {
+        if (!reached('conectar')) setHint(id === 'ar_puxar' ? `Antes de conectar, puxe ${fmt(ALVO_ML)} mL de ar na seringa.` : 'Ainda não: siga o passo atual do painel.', 300);
+        else if (!otherHandHolds(P.vial, sh)) P.hint = 'Segure o frasco com a outra mão para conectar.';
+        else { P.hint = 'Pressione a seringa até o clique.'; if (al.axial < 0.002) connectToVial(); }
+      }
+    }
+    if (reached('bolsa_con') && !reached('bolsa_desc') && P.syrOn === null) {
+      const pw = portWorld(), al = alignTo(pw.p, pw.axis);
+      if (al.ok) { P.hint = 'Pressione a seringa no adaptador da bolsa até o clique.'; if (al.axial < 0.003) connectToBag(); }
+    }
+  }
+  // giro (VR): relativo entre as duas mãos
   if (P.twist && typeof P.twist.hand === 'number') {
-    const tw = P.twist, hw = handWorld(tw.hand), { up } = vialFrame();
-    if (tw.mode === 'connect' && held[tw.hand] !== P.syringe) cancelTwist();
-    else if (typeof tw.other === 'number' && P.vial.userData.heldBy !== tw.other) cancelTwist();   // soltou o frasco
-    else if (hw.p.distanceTo(tw.start) > 0.08) cancelTwist();          // afastou a mão: desiste
+    const tw = P.twist, hw = handWorld(tw.hand);
+    const base = tw.mode === 'sadapt' ? P.sad : P.vial, { up } = frameOf(base);
+    if (tw.mode === 'sadapt' && held[tw.hand] !== P.syringe) cancelTwist();
+    else if (typeof tw.other === 'number' && base.userData.heldBy !== tw.other) cancelTwist();
+    else if (hw.p.distanceTo(tw.start) > 0.08) cancelTwist();
     else {
-      // giro relativo entre as duas mãos (como rosquear de verdade)
       let dA = twistAbout(tw.lastQ, hw.q, up); tw.lastQ = hw.q;
       if (typeof tw.other === 'number') { const ho = handWorld(tw.other); dA -= twistAbout(tw.lastQo, ho.q, up); tw.lastQo = ho.q; }
-      tw.angle += dA; twistClicks(tw);
-      P.hint = tw.mode === 'connect' ? 'Gire a seringa ¼ de volta para rosquear.' : 'Gire a seringa ¼ de volta para soltar.';
+      tw.angle += dA; twistClicks(tw, hw.p);
+      P.hint = tw.mode === 'sadapt' ? 'Gire a seringa ¼ de volta para rosquear no adaptador.' : 'Gire a seringa ¼ de volta para soltar do OncoSafe.';
       const prog = Math.min(1, Math.abs(tw.angle) / TWIST_NEED);
-      setLuerGlow(prog);
-      if (tw.mode === 'connect') {
-        placeSyringeOnLuer(tw.angle, prog);
-        if (prog >= 1) { setLuerGlow(0); connectSyringe(tw.angle); }
-      } else {
-        P.syringe.quaternion.copy(new THREE.Quaternion().setFromAxisAngle(YAXIS, tw.angle).multiply(tw.baseQ));
-        if (prog >= 1) { setLuerGlow(0); detachSyringe(tw.hand); }
-      }
+      if (tw.mode === 'sadapt') { placeSyringeOnSad(tw.angle, prog); if (prog >= 1) attachSad(); }
+      else { setLuerGlow(prog); P.syringe.quaternion.copy(new THREE.Quaternion().setFromAxisAngle(YAXIS, tw.angle).multiply(tw.baseQ)); if (prog >= 1) { setLuerGlow(0); detachFromVial(tw.hand); } }
     }
   }
   if (P.twist && P.twist.hand === 'mouse') {
     const tw = P.twist, prog = Math.min(1, Math.abs(tw.angle) / TWIST_NEED);
-    setLuerGlow(prog);
-    if (tw.mode === 'connect') { placeSyringeOnLuer(tw.angle, prog); if (prog >= 1) { setLuerGlow(0); connectSyringe(tw.angle); } }
-    else {
-      P.syringe.quaternion.copy(new THREE.Quaternion().setFromAxisAngle(YAXIS, tw.angle).multiply(tw.baseQ));
-      if (prog >= 1) { setLuerGlow(0); detachSyringe('mouse'); }
-    }
+    if (tw.mode === 'sadapt') { placeSyringeOnSad(tw.angle, prog); if (prog >= 1) attachSad(); }
+    else { setLuerGlow(prog); P.syringe.quaternion.copy(new THREE.Quaternion().setFromAxisAngle(YAXIS, tw.angle).multiply(tw.baseQ)); if (prog >= 1) { setLuerGlow(0); detachFromVial('mouse'); } }
   }
-  // êmbolo
-  if (P.plunger && P.syringeOn && typeof P.plunger.hand === 'number' && !otherHandHolds(P.vial, P.plunger.hand)) P.plunger = null;
-  if (P.plunger && P.syringeOn && P.plunger.hand !== 'mouse') P.hint = `Puxe o êmbolo até ${fmt(ALVO_ML)} mL.`;
-  if (P.plunger && P.syringeOn) {
-    if (P.plunger.hand === 'mouse') setStroke(P.plunger.start + (P.plunger.y - P.plunger.y0) * 0.5);   // no mouse: mais preciso
+
+  // êmbolo (VR e PC)
+  if (P.plunger && typeof P.plunger.hand === 'number' && !syringeBaseOK(P.plunger.hand)) P.plunger = null;
+  if (P.plunger) {
+    if (id === 'aspirar' && P.syrOn === 'vial' && !vialInverted()) P.hint = 'Inverta o conjunto (frasco por cima) para aspirar o líquido.';
+    if (P.plunger.hand === 'mouse') setStroke(P.plunger.start + (P.plunger.proj - P.plunger.proj0) * 0.7);
     else {
-      const p = handWorld(P.plunger.hand).p;
-      const ax = new THREE.Vector3(0, 1, 0).applyQuaternion(P.syringe.getWorldQuaternion(new THREE.Quaternion()));
+      const p = handWorld(P.plunger.hand).p, ax = syrUp();
       setStroke(P.plunger.start + p.sub(P.syringe.getWorldPosition(new THREE.Vector3())).dot(ax) - P.plunger.proj0);
     }
+  } else updateVolumes();
+
+  // etiqueta, bandeja e descarte
+  if (reached('rotular') && !P.labelOn && P.label && items.includes(P.label)) {
+    const lp = P.label.getWorldPosition(new THREE.Vector3()), bp = P.bag.localToWorld(new THREE.Vector3(-0.02, 0.02, 0));
+    if (lp.distanceTo(bp) < 0.06) attachLabel();
   }
-  // passos
-  const inside = [P.vial, P.adapter, P.syringe].filter(insideCapela).length;
-  if (inside > P.inside) tutEvent('place');
-  P.inside = inside;
-  const d = P.done, before = d.filter(Boolean).length;
-  if (inside === 3) d[0] = true;
-  if (P.adapterOn) d[1] = true;
-  if (P.syringeOn) d[2] = true;
-  // volume certo (±0,3 mL) com o êmbolo solto; se passar do alvo, dá para empurrar de volta
-  if (P.syringeOn && !P.plunger && Math.abs(syringeML() - ALVO_ML) <= 0.3) d[3] = true;
-  if (d[3] && !P.syringeOn) d[4] = true;
-  const after = d.filter(Boolean).length;
-  if (after > before) { if (after === 5) { SFX.completo(); P.allDone = true; } else SFX.confirma(); }
+  if (reached('descartar')) {
+    for (const it of [P.vial, P.syringe, P.pad, P.gauze, P.label]) {
+      if (!it || !items.includes(it) || P.discarded.has(it)) continue;
+      const p = it.getWorldPosition(new THREE.Vector3());
+      if (overWaste(p, 0.02) && p.y < WASTE.y + WASTE.h + 0.08 && !(it === P.syringe && P.syrOn)) {
+        if (heldOrMouse(it)) continue;                                       // descarta quando é solto dentro do coletor
+        discard(it);
+      }
+    }
+  }
+  if (id === 'limpar2' && (!P.gauze || P.discarded.has(P.gauze))) {           // gaze nova para a limpeza final
+    P.gauze = addProcItem(buildGauze(), 'Gaze com álcool 70%', new THREE.Vector3(0.56, 0.751, 0.22), 'gauze', 'plastico',
+      { grip: new THREE.Vector3(0, 0.004, 0), gripMode: 'palma' });
+  }
+
+  // checagem de cada passo (na ordem)
+  P.inside = [P.vial, P.adapter, P.sad, P.syringe, P.bag].filter(o => o && (P.adapterOn && o === P.adapter ? true : insideCapela(o))).length;
+  let ok = false;
+  switch (id) {
+    case 'ligar': ok = capelaOn && P.purgeLeft <= 0; if (!capelaOn) P.hint = P.hint || 'Toque no botão verde ao lado do logo.'; break;
+    case 'limpar1': ok = cleanFraction() >= COBERTURA; break;
+    case 'campo': ok = !!P.padSheet; break;
+    case 'vidro': {
+      const s = sashStatus(), grills = grillsBlocked();
+      if (s === 'alto') P.hint = 'Abaixe o vidro até a altura de trabalho.';
+      else if (s === 'fechado') P.hint = 'Suba o vidro até a altura de trabalho.';
+      else if (grills) P.hint = 'Tire os itens de cima das grelhas (borda da frente e do fundo).';
+      P.vidroT = s === 'ok' && !grills ? P.vidroT + dt : 0; ok = P.vidroT > 1.2; break;
+    }
+    case 'materiais': ok = P.inside === 5; break;
+    case 'septo': ok = P.septoT >= SEPTO_S; break;
+    case 'montagem': ok = P.adapterOn; break;
+    case 'sadapt': ok = P.sadOn; break;
+    case 'ar_puxar': ok = !P.plunger && P.syr.air >= ALVO_ML - 0.3; break;
+    case 'conectar': ok = P.syrOn === 'vial'; break;
+    case 'ar_injetar': ok = !P.plunger && syringeML() <= 0.15 && P.balloon >= ALVO_ML - 0.5; if (vialInverted()) P.hint = P.hint || 'Para injetar o ar, mantenha o frasco em pé.'; break;
+    case 'inverter': P.invT = vialInverted() && heldOrMouse(P.vial) ? P.invT + dt : 0; ok = P.invT > 0.6; break;
+    case 'aspirar': ok = syringeML() >= ALVO_ML - 0.1 && P.syr.liq >= 3; if (ok) P.bubbleLeft = 0; break;
+    case 'bolhas':
+      if (P.syr.air > 0.02) P.hint = P.hint || 'Há ar na seringa: empurre o êmbolo devagar para devolvê-lo ao frasco e complete.';
+      ok = !P.plunger && P.syr.air <= 0.02 && Math.abs(P.syr.liq - ALVO_ML) <= 0.15; break;
+    case 'desconectar': ok = P.syrOn !== 'vial'; break;
+    case 'bolsa_con': ok = P.syrOn === 'bag'; break;
+    case 'injetar': ok = !P.plunger && P.syr.liq <= 0.05; break;
+    case 'bolsa_desc': ok = P.syrOn !== 'bag'; break;
+    case 'rotular': ok = P.labelOn; break;
+    case 'embalar': ok = itemRestingIn(P.bag, p => Math.abs(p.x - TRAY.x) < TRAY.w / 2 && Math.abs(p.z - TRAY.z) < TRAY.d / 2 && p.y < TRAY.y + 0.06); break;
+    case 'descartar': ok = [P.vial, P.syringe, P.pad].every(o => P.discarded.has(o)); break;
+    case 'limpar2': ok = cleanFraction() >= COBERTURA; break;
+    case 'aguardar':
+      if (capelaOn) P.waitLeft = Math.max(0, P.waitLeft - dt); else P.hint = 'Mantenha a capela ligada.';
+      ok = P.waitLeft <= 0; break;
+  }
+  if (ok) {
+    P.step++; P.vidroT = 0; P.invT = 0;
+    const nid = curStep();
+    if (nid === 'limpar2') { P.cleanPass = 2; resetCleaning(); }
+    if (nid === 'aspirar') P.bubbleLeft = BOLHA_ML;
+    if (nid === 'fim') { P.allDone = true; SFX.completo(); } else SFX.confirma();
+    if (nid === 'campo' || nid === 'materiais') tutEvent('place');
+  }
+  invBtn.style.display = !renderer.xr.isPresenting && P.adapterOn && P.syrOn === 'vial' && ['inverter', 'aspirar', 'bolhas', 'desconectar'].includes(curStep()) || P.stand ? 'block' : 'none';
+  invBtn.textContent = P.stand === 'down' ? 'Desvirar conjunto (I)' : 'Inverter conjunto (I)';
   drawProcPanel();
+  updateGuides();
 }
+function insideSurface(p) { return p.x > table.minX && p.x < table.maxX && p.z > table.minZ && p.z < table.maxZ && p.y > table.top - 0.02 && p.y < table.top + 0.08; }
 function insideCapela(obj) {
   const p = obj.getWorldPosition(new THREE.Vector3());
   return p.x > table.minX && p.x < table.maxX && p.z > table.minZ && p.z < table.maxZ && p.y > table.top - 0.02 && p.y < table.top + 0.45;
 }
+function grillsBlocked() {                            // grelha da frente (borda) e do fundo livres
+  for (const it of items) {
+    if (heldOrMouse(it)) continue;
+    const p = it.getWorldPosition(new THREE.Vector3());
+    if (!insideCapela(it)) continue;
+    if (p.z > table.maxZ - 0.045 || p.z < table.minZ + 0.035) return true;
+  }
+  return false;
+}
 
-// --- painel de passos (VR e PC) ---
+// ---------- painel ----------
 let procPanelKey = '';
-const fmt = v => v.toFixed(1).replace('.', ',');
-function procSteps(vr) {
-  return [
-    `Levar frasco, OncoSafe e seringa para a capela (${P.inside}/3)`,
-    vr ? 'Frasco numa mão, OncoSafe na outra: junte e pressione até travar' : 'Encaixar o OncoSafe: solte-o em cima do frasco',
-    vr ? 'Frasco numa mão, seringa na outra (pinça): encaixe no luer e gire ¼' : 'Conectar a seringa: leve ao luer e gire com a roda do mouse',
-    vr ? `Segure o conjunto e puxe o êmbolo com a outra mão até ${fmt(ALVO_ML)} mL` : `Arrastar o êmbolo para cima até ${fmt(ALVO_ML)} mL`,
-    vr ? 'Segure o conjunto e gire a seringa ¼ de volta para soltar' : 'Desconectar: clique na seringa e gire com a roda',
-  ];
+function stepText(k, vr) { const s = STEPS[k]; return (vr ? s.vr : (s.pc || s.vr)); }
+function statusLine() {
+  const id = curStep();
+  const mmss = s => `${Math.floor(s / 60)}:${String(Math.ceil(s % 60) === 60 ? 0 : Math.ceil(s % 60)).padStart(2, '0')}`;
+  if (id === 'ligar') return capelaOn ? `Purga: ${mmss(P.purgeLeft)} restantes (simulado)` : 'Capela desligada';
+  if (id === 'limpar1' || id === 'limpar2') return `Bancada limpa: ${Math.round(cleanFraction() * 100)}% (mín. ${Math.round(COBERTURA * 100)}%)`;
+  if (id === 'materiais') return `Materiais na capela: ${P.inside}/5`;
+  if (id === 'septo') return `Septo: ${Math.min(100, Math.round(P.septoT / SEPTO_S * 100))}% desinfetado`;
+  if (id === 'aguardar') return `Capela ligada: ${mmss(P.waitLeft)} restantes (30 min simulados)`;
+  if (['injetar', 'bolsa_desc', 'rotular', 'embalar'].includes(id)) return `Seringa: ${fmt(P.syr.liq)} mL     Bolsa: ${fmt(P.bagMl)} mL`;
+  if (reached('ar_puxar') && !reached('bolsa_con'))
+    return `Seringa: líquido ${fmt(P.syr.liq)} mL · ar ${fmt(P.syr.air)} mL     Frasco: ${fmt(P.vialLiq)} mL     Balão: ${fmt(Math.max(0, P.balloon))} mL`;
+  return '';
 }
 function drawProcPanel() {
-  const vr = renderer.xr.isPresenting, cur = P.done.indexOf(false);
-  const key = [vr, P.inside, ...P.done, fmt(syringeML()), !!P.plunger, P.hint].join('|');
+  const vr = renderer.xr.isPresenting, k = P.step, id = curStep();
+  const status = statusLine();
+  const key = [vr, k, P.hint, status, P.allDone].join('|');
   if (key === procPanelKey) return;
   procPanelKey = key;
   const g = panelCanvas.getContext('2d'), W = panelCanvas.width, H = panelCanvas.height;
   g.clearRect(0, 0, W, H);
   g.fillStyle = 'rgba(16,22,30,0.92)'; g.beginPath(); g.roundRect(4, 4, W - 8, H - 8, 28); g.fill();
   g.fillStyle = P.allDone ? '#1e8a4c' : '#005b9a'; g.beginPath(); g.roundRect(4, 4, W - 8, 84, [28, 28, 0, 0]); g.fill();
-  g.fillStyle = '#fff'; g.textAlign = 'left'; g.font = 'bold 38px system-ui, sans-serif';
-  g.fillText(P.allDone ? 'PROCEDIMENTO CONCLUÍDO ✓' : 'PROCEDIMENTO', 32, 58);
-  g.font = '22px system-ui, sans-serif'; g.textAlign = 'right'; g.fillText('Frasco + OncoSafe · sistema fechado', W - 30, 56);
+  g.fillStyle = '#fff'; g.textAlign = 'left'; g.font = 'bold 36px system-ui, sans-serif';
+  g.fillText(P.allDone ? 'PROCEDIMENTO CONCLUÍDO ✓' : `PASSO ${k + 1} DE ${STEPS.length}`, 32, 58);
+  g.font = 'bold 24px system-ui, sans-serif'; g.textAlign = 'right';
+  g.fillText(P.allDone ? 'Sistema fechado · OncoSafe' : STEPS[k].fase.toUpperCase(), W - 30, 56);
+  // barra de progresso
+  g.fillStyle = 'rgba(255,255,255,0.12)'; g.fillRect(24, 100, W - 48, 10);
+  g.fillStyle = '#5ee08a'; g.fillRect(24, 100, (W - 48) * Math.min(1, k / STEPS.length), 10);
   g.textAlign = 'left';
-  procSteps(vr).forEach((t, k) => {
-    const y = 140 + k * 66, ok = P.done[k], now = k === cur;
-    if (now) { g.fillStyle = 'rgba(255,214,0,0.14)'; g.fillRect(16, y - 40, W - 32, 58); }
-    g.fillStyle = ok ? '#5ee08a' : now ? '#ffd600' : '#7d8790';
-    g.font = 'bold 34px system-ui, sans-serif'; g.fillText(ok ? '✓' : now ? '▶' : `${k + 1}`, 30, y);
-    g.fillStyle = ok ? '#a9e8c0' : now ? '#ffffff' : '#9aa3ab';
-    g.font = (now ? 'bold ' : '') + '25px system-ui, sans-serif'; g.fillText(t, 76, y, W - 100);
+  const fase = STEPS[Math.min(k, STEPS.length - 1)].fase;
+  const idxs = STEPS.map((s, i) => i).filter(i => STEPS[i].fase === fase);
+  idxs.forEach((i, n) => {
+    const y = 160 + n * 58, done = i < k, now = i === k;
+    if (now) { g.fillStyle = 'rgba(255,214,0,0.14)'; g.fillRect(16, y - 38, W - 32, 52); }
+    g.fillStyle = done ? '#5ee08a' : now ? '#ffd600' : '#7d8790';
+    g.font = 'bold 30px system-ui, sans-serif'; g.fillText(done ? '✓' : now ? '▶' : `${i + 1}`, 28, y);
+    g.fillStyle = done ? '#a9e8c0' : now ? '#ffffff' : '#9aa3ab';
+    g.font = (now ? 'bold ' : '') + '24px system-ui, sans-serif'; g.fillText(stepText(i, vr), 80, y, W - 104);
   });
-  g.fillStyle = '#cfe3f2'; g.font = '24px system-ui, sans-serif';
-  if (P.hint) {
+  if (P.hint && !P.allDone) {
     g.fillStyle = 'rgba(255,183,77,0.16)'; g.fillRect(16, H - 112, W - 32, 44);
-    g.fillStyle = '#ffcc80'; g.font = 'bold 25px system-ui, sans-serif'; g.fillText('👉 ' + P.hint, 32, H - 82, W - 60);
+    g.fillStyle = '#ffcc80'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText('👉 ' + P.hint, 32, H - 82, W - 60);
   }
-  const over = P.syringeOn && !P.done[3] && syringeML() > ALVO_ML + 0.3;
-  g.fillStyle = over ? '#ffb74d' : '#cfe3f2';
-  g.fillText(over ? `Seringa: ${fmt(syringeML())} mL · passou do alvo: empurre o êmbolo até ${fmt(ALVO_ML)} mL`
-                  : `Seringa: ${fmt(syringeML())} mL     Frasco: ${fmt(VIAL_ML - syringeML())} mL     (alvo provisório: ${fmt(ALVO_ML)} mL)`, 32, H - 30, W - 60);
+  g.fillStyle = '#cfe3f2'; g.font = '24px system-ui, sans-serif'; g.fillText(P.allDone ? 'Bolsa pronta e embalada · capela limpa.' : status, 32, H - 30, W - 60);
   panelTex.needsUpdate = true;
-  countEl.textContent = P.allDone ? 'Procedimento concluído ✓' : `Passo ${cur + 1}/5 · ${procSteps(vr)[cur]}`;
+  countEl.textContent = P.allDone ? 'Procedimento concluído ✓' : `Passo ${k + 1}/${STEPS.length} · ${stepText(k, vr)}`;
   countEl.classList.toggle('done', P.allDone);
   zone.material.color.set(P.allDone ? 0x5ee08a : 0x4fd1ff);
 }
 
-// --- mouse (PC) ---
-function procPointerDown(hit, e) {
-  if (P.twist && P.twist.hand === 'mouse') {          // clicou em outro lugar: desiste do giro
-    const onSyr = isInside(hit?.object, P.syringe);
-    if (!onSyr) cancelTwist();
-    else if (P.twist.mode === 'connect') { cancelTwist(); return false; }   // clicar na seringa encaixada: volta a arrastar
-    else return true;
-  }
-  if (!hit || !P.syringeOn || !isInside(hit.object, P.syringe)) return false;
-  if (isInside(hit.object, P.syringe.children[0].userData.parts.rod)) {
-    P.plunger = { hand: 'mouse', start: P.stroke, y0: mousePlungerY(e), y: mousePlungerY(e) };
-    controls.enabled = false; renderer.domElement.setPointerCapture(e.pointerId);
-  } else {
-    P.twist = { mode: 'disconnect', hand: 'mouse', angle: 0, baseQ: P.syringe.quaternion.clone(), lastClick: 0 };
-    controls.enabled = false;
-  }
-  return true;
-}
+// ---------- mouse (PC) ----------
 function isInside(obj, root) { while (obj) { if (obj === root) return true; obj = obj.parent; } return false; }
 const plungerPlane = new THREE.Plane();
-function mousePlungerY(e) {
+function mousePlungerProj(e) {
   setNdc(e);
-  const thumb = syringePoints().thumb, n = new THREE.Vector3(); camera.getWorldDirection(n); n.y = 0; n.normalize();
+  const thumb = P.syringe.localToWorld(new THREE.Vector3(0, P.syringe.children[0].userData.parts.thumbY + P.stroke, 0));
+  const n = new THREE.Vector3(); camera.getWorldDirection(n);
   plungerPlane.setFromNormalAndCoplanarPoint(n, thumb);
   const pt = new THREE.Vector3();
-  return raycaster.ray.intersectPlane(plungerPlane, pt) ? pt.y : 0;
+  if (!raycaster.ray.intersectPlane(plungerPlane, pt)) return 0;
+  return pt.sub(P.syringe.getWorldPosition(new THREE.Vector3())).dot(syrUp());
+}
+function procPointerDown(hit, e) {
+  if (P.twist && P.twist.hand === 'mouse') {
+    const onSyr = isInside(hit?.object, P.syringe);
+    if (!onSyr) cancelTwist();
+    else if (P.twist.mode === 'sadapt') { cancelTwist(); return false; }
+    else return true;
+  }
+  if (!hit && curStep() === 'descartar' && P.padSheet) {   // clicar no campo aberto: dobra para descartar
+    setNdc(e);
+    if (raycaster.intersectObject(P.padSheet)[0]) { pickPadSheet('mouse'); return true; }
+  }
+  if (hit && P.stand && !P.syrOn && isInside(hit.object, P.vial)) releaseStand();   // suporte: pega o conjunto de volta
+  const onAssembly = hit && P.syrOn === 'vial' && isInside(hit.object, P.vial) && ['ar_injetar', 'aspirar', 'bolhas'].includes(curStep());
+  if (!hit || (!isInside(hit.object, P.syringe) && !onAssembly)) return false;
+  const onRod = isInside(hit.object, P.syringe.children[0].userData.parts.rod);
+  const twistNow = P.syrOn === 'vial' && reached('desconectar'), pullNow = P.syrOn === 'bag' && reached('bolsa_desc');
+  // seringa conectada: clicar em qualquer parte dela move o êmbolo; solta: só pelo êmbolo
+  const canPlunger = (P.syrOn && !twistNow && !pullNow) || (onRod && P.sadOn && reached('ar_puxar'));
+  if (canPlunger) {
+    P.plunger = { hand: 'mouse', start: P.stroke, proj0: mousePlungerProj(e), proj: mousePlungerProj(e) };
+    controls.enabled = false; renderer.domElement.setPointerCapture(e.pointerId); return true;
+  }
+  if (P.syrOn === 'vial' && reached('desconectar')) {
+    P.twist = { mode: 'disconnect', hand: 'mouse', angle: 0, baseQ: P.syringe.quaternion.clone(), lastClick: 0 };
+    controls.enabled = false; return true;
+  }
+  if (P.syrOn === 'bag' && reached('bolsa_desc')) { detachFromBag('mouse'); return true; }
+  if (P.syrOn) return true;                            // seringa conectada: não arrasta sozinha
+  return false;
 }
 function procPointerMove(e) {
-  if (P.plunger && P.plunger.hand === 'mouse') { P.plunger.y = mousePlungerY(e); return true; }
+  if (P.plunger && P.plunger.hand === 'mouse') { P.plunger.proj = mousePlungerProj(e); return true; }
   return false;
 }
 function procPointerUp() {
   if (P.plunger && P.plunger.hand === 'mouse') { P.plunger = null; controls.enabled = true; return true; }
+  if (dragging === P.syringe && P.twist?.mode === 'sadapt') { dragging = null; controls.enabled = false; return true; }  // espera o giro
+  if (dragging === P.adapter && !P.adapterOn && reached('montagem')) {
+    const al = adapterAlignment();
+    if (al.lateral < 0.025 && al.vialUp > 0.87 && al.axial > -0.01) { controls.enabled = true; lockAdapter(); return true; }
+  }
+  if (dragging === P.syringe && P.sadOn && !P.syrOn) {
+    const t = P.syringe.position;
+    if (P.adapterOn && reached('conectar') && !reached('desconectar') && vialFrame().up.y > 0.85) {
+      const l = luerWorld(); if (Math.hypot(t.x - l.x, t.z - l.z) < 0.03) { controls.enabled = true; connectToVial(); return true; }
+    }
+    if (reached('bolsa_con') && !reached('bolsa_desc')) {
+      const pw = portWorld().p; if (Math.hypot(t.x - pw.x, t.z - pw.z) < 0.06) {
+        dragging = null; controls.enabled = true; connectToBag(); return true; }
+    }
+  }
+  if (dragging === P.label && reached('rotular')) {
+    const lp = P.label.position, bp = P.bag.getWorldPosition(new THREE.Vector3());
+    if (Math.hypot(lp.x - bp.x, lp.z - bp.z) < 0.09) { attachLabel(); controls.enabled = true; return true; }
+  }
   return false;
 }
-// ao arrastar a seringa com o mouse: perto do luer ela pré-encaixa e espera o giro (roda do mouse)
+// altura do arrasto no PC: gaze desce até a bancada (limpar) ou até o septo
+function procDragHeight(item, pos) {
+  if (item === P.gauze) {
+    const top = P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y, 0));
+    if (curStep() === 'septo' && Math.hypot(pos.x - top.x, pos.z - top.z) < 0.035) return top.y + 0.002;
+    if (insideSurface(new THREE.Vector3(pos.x, table.top, pos.z))) return table.top + 0.001;
+  }
+  if (item === P.vial && P.stand) return null;
+  return null;
+}
 function procMouseDragMove(wanted) {
-  if (dragging !== P.syringe || P.syringeOn || !P.adapterOn) return;
-  const luer = luerWorld(), dist = Math.hypot(wanted.x - luer.x, wanted.z - luer.z);
-  if (!P.twist && dist < 0.03 && vialFrame().up.y > 0.85)
-    P.twist = { mode: 'connect', hand: 'mouse', angle: 0, lastClick: 0 };
-  else if (P.twist && P.twist.mode === 'connect' && P.twist.hand === 'mouse' && dist > 0.07) cancelTwist();
+  if (dragging !== P.syringe || P.sadOn || !P.sad || !items.includes(P.sad)) return;
+  const top = sadTopWorld(), dist = Math.hypot(wanted.x - top.x, wanted.z - top.z);
+  if (!P.twist && dist < 0.03 && frameOf(P.sad).up.y > 0.85 && reached('sadapt'))
+    P.twist = { mode: 'sadapt', hand: 'mouse', angle: 0, lastClick: 0 };
+  else if (P.twist && P.twist.mode === 'sadapt' && P.twist.hand === 'mouse' && dist > 0.07) cancelTwist();
 }
 function procWheel(e) {
   if (!P.twist || P.twist.hand !== 'mouse') return false;
   e.preventDefault();
   P.twist.angle += Math.sign(e.deltaY || 1) * THREE.MathUtils.degToRad(25);
-  twistClicks(P.twist);
+  twistClicks(P.twist, P.syringe.getWorldPosition(new THREE.Vector3()));
   return true;
 }
+
+
+// ---------- setas-guia: o que pegar, para onde levar e qual movimento fazer em cada passo ----------
+let guidesOn = true;
+const GUIDE_COL = 0xffd400;
+const guideMat = new THREE.MeshBasicMaterial({ color: GUIDE_COL, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false });
+const guideMat2 = new THREE.MeshBasicMaterial({ color: 0x2a2000, transparent: true, opacity: 0.55, depthTest: false, depthWrite: false });
+const guideRoot = new THREE.Group(); scene.add(guideRoot);
+function gMesh(geo, mat = guideMat, ro = 20) { const m = new THREE.Mesh(geo, mat); m.renderOrder = ro; m.frustumCulled = false; return m; }
+// seta reta (ponta na origem, apontando para -Y)
+function makeStraightArrow(len, r = 0.0045) {
+  const g = new THREE.Group();
+  const head = r * 6, sh = Math.max(0.005, len - head);
+  g.add(gMesh(new THREE.ConeGeometry(r * 2.6, head, 18).rotateX(Math.PI).translate(0, head / 2, 0)));
+  g.add(gMesh(new THREE.CylinderGeometry(r, r, sh, 12).translate(0, head + sh / 2, 0)));
+  g.add(gMesh(new THREE.ConeGeometry(r * 3.4, head * 1.25, 18).rotateX(Math.PI).translate(0, head / 2 - 0.002, 0), guideMat2, 19));   // contorno escuro
+  return g;
+}
+// seta curva (giro): arco no plano XY, girando em torno de +Z
+function makeArcArrow(radius, arc = Math.PI * 1.4, tube = 0.0035) {
+  const g = new THREE.Group();
+  g.add(gMesh(new THREE.TorusGeometry(radius, tube, 8, 32, arc)));
+  const head = gMesh(new THREE.ConeGeometry(tube * 3, tube * 7, 16));
+  head.position.set(radius * Math.cos(arc), radius * Math.sin(arc), 0);
+  head.rotation.z = arc;                            // tangente do arco (sentido anti-horário)
+  g.add(head);
+  return g;
+}
+function makeRing() {
+  const g = new THREE.Group();
+  g.add(gMesh(new THREE.RingGeometry(0.032, 0.040, 40)));
+  g.add(gMesh(new THREE.RingGeometry(0.014, 0.018, 28)));
+  return g;
+}
+const G = {
+  point: [0, 1, 2].map(() => makeStraightArrow(0.12, 0.0075)),
+  move: [0, 1].map(() => makeStraightArrow(0.075, 0.0055)),
+  ring: [0, 1].map(() => makeRing()),
+  rot: [makeArcArrow(0.035, Math.PI * 1.4, 0.0045), makeArcArrow(0.09, Math.PI * 1.1, 0.0065)],
+};
+for (const k in G) for (const m of G[k]) { m.visible = false; guideRoot.add(m); }
+const gUse = { point: 0, move: 0, ring: 0, rot: 0 };
+const gt = () => performance.now() / 1000;
+const _gdq = new THREE.Quaternion(), _gdv = new THREE.Vector3();
+function take(kind) { const m = G[kind][gUse[kind]++]; if (m) m.visible = true; return m; }
+// seta grande pulsando em cima de um ponto (o que pegar / onde tocar)
+function gPoint(p) {
+  const m = take('point'); if (!m) return;
+  m.position.copy(p).add(_gdv.set(0, 0.012 + 0.018 * (0.5 + 0.5 * Math.sin(gt() * 5)), 0));
+  m.quaternion.identity();
+}
+function gPointItem(item) { if (item) gPoint(topOf(item)); }
+// anel no destino (onde soltar/encaixar); normal = eixo do anel
+function gRing(p, normal = YAXIS, size = 1) {
+  const m = take('ring'); if (!m) return;
+  m.position.copy(p).addScaledVector(normal, 0.003);
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+  m.scale.setScalar(size * (1 + 0.15 * Math.sin(gt() * 6)));
+}
+// seta de movimento: desliza de "from" no sentido "dir"
+function gMove(from, dir, len = 0.06) {
+  const m = take('move'); if (!m) return;
+  const d = _gdv.copy(dir).normalize(), k = (gt() * 1.2) % 1;
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), d);   // a ponta segue "dir"
+  m.position.copy(from).addScaledVector(d, len * (0.35 + 0.65 * k));
+  m.scale.setScalar(0.8 + 0.2 * Math.sin(k * Math.PI));
+}
+function gMoveTo(from, to) { const d = to.clone().sub(from), L = d.length(); if (L > 0.015) gMove(from, d, Math.min(L, 0.12)); }
+// seta de giro em torno de um eixo
+function gRot(center, axis, big = false, sign = 1) {
+  const m = G.rot[big ? 1 : 0]; if (m.visible) return; m.visible = true;
+  m.position.copy(center);
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axis.clone().normalize().multiplyScalar(sign))
+    .multiply(_gdq.setFromAxisAngle(new THREE.Vector3(0, 0, 1), (gt() * 2.2) % (Math.PI * 2)));
+}
+function topOf(item) {
+  const b = _box.setFromObject(item); return new THREE.Vector3((b.min.x + b.max.x) / 2, b.max.y, (b.min.z + b.max.z) / 2);
+}
+const CAP_SPOT = new THREE.Vector3(-0.05, table.top, CZ - 0.42);
+function thumbWorld() { return P.syringe.localToWorld(new THREE.Vector3(0, P.syringe.children[0].userData.parts.thumbY + P.stroke, 0)); }
+function gPull() { const ax = syrUp(); gMove(thumbWorld().addScaledVector(ax, 0.01), ax, 0.055); }
+function gPush() { const ax = syrUp(); gMove(thumbWorld().addScaledVector(ax, 0.075), ax.clone().negate(), 0.055); }
+function gFlip() {                                   // arco vertical em volta do frasco: virar de cabeça para baixo
+  const c = P.vial.getWorldPosition(new THREE.Vector3()).addScaledVector(vialFrame().up, 0.05);
+  const f = new THREE.Vector3(); camera.getWorldDirection(f); f.y = 0; f.normalize();
+  gRot(c, f.negate(), true);                       // arco de frente para quem olha
+}
+function sashHandleWorld() { return capelaRef.localToWorld(new THREE.Vector3(0, HANDLE_Y + sashOffset, HANDLE_Z)); }
+function nearestDirty(p) {
+  let best = null, bd = 1e9;
+  for (const c of cleanCells) if (!c.done) { const d = Math.hypot(c.c.x - p.x, c.c.z - p.z); if (d < bd) { bd = d; best = c; } }
+  return best;
+}
+function heldBy(item) { return heldOrMouse(item); }
+function blockingGrillItem() {
+  for (const it of items) {
+    if (heldOrMouse(it) || !insideCapela(it)) continue;
+    const p = it.getWorldPosition(new THREE.Vector3());
+    if (p.z > table.maxZ - 0.045 || p.z < table.minZ + 0.035) return it;
+  }
+  return null;
+}
+function guideStep() {
+  const id = curStep(), vr = renderer.xr.isPresenting;
+  const S = P.syringe, V = P.vial;
+  switch (id) {
+    case 'ligar': if (!capelaOn) gPoint(powerBtn.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 0.025, 0.01))); break;
+    case 'limpar1': case 'limpar2': {
+      if (!P.gauze || !items.includes(P.gauze)) break;
+      if (!heldBy(P.gauze)) { gPointItem(P.gauze); break; }
+      const c = nearestDirty(P.gauze.getWorldPosition(new THREE.Vector3()));
+      if (c) { gRing(c.c, YAXIS, 1.8); gMoveTo(P.gauze.getWorldPosition(new THREE.Vector3()).setY(table.top + 0.01), c.c.clone().setY(table.top + 0.01)); }
+      break;
+    }
+    case 'campo':
+      if (P.pad && items.includes(P.pad)) { if (!heldBy(P.pad)) gPointItem(P.pad); else gRing(CAP_SPOT, YAXIS, 2.2); }
+      break;
+    case 'vidro': {
+      const s = sashStatus(), h = sashHandleWorld();
+      if (s === 'alto') { gPoint(h); gMove(h.clone().add(new THREE.Vector3(0, -0.02, 0.05)), new THREE.Vector3(0, -1, 0), 0.08); }
+      else if (s === 'fechado') { gPoint(h); gMove(h.clone().add(new THREE.Vector3(0, 0.02, 0.05)), YAXIS, 0.08); }
+      else { const it = blockingGrillItem(); if (it) { gPointItem(it); gRing(CAP_SPOT, YAXIS, 1.6); } }
+      break;
+    }
+    case 'materiais': {
+      const list = [V, P.adapter, P.sad, S, P.bag];
+      if (list.some(o => heldBy(o))) { gRing(CAP_SPOT, YAXIS, 2); break; }
+      const next = list.find(o => !insideCapela(o)); if (next) gPointItem(next);
+      break;
+    }
+    case 'septo': {
+      const top = V.localToWorld(new THREE.Vector3(0, SEAT_Y, 0));
+      if (!heldBy(P.gauze)) { gPointItem(P.gauze); gRing(top, YAXIS, 0.6); }
+      else { gRing(top, YAXIS, 0.6); gRot(top.clone().add(new THREE.Vector3(0, 0.015, 0)), YAXIS); }
+      break;
+    }
+    case 'montagem': {
+      const top = V.localToWorld(new THREE.Vector3(0, SEAT_Y, 0)), ha = P.adapter.userData.heldBy, hv = V.userData.heldBy;
+      if (vr) {
+        if (typeof hv !== 'number') gPointItem(V);
+        else if (typeof ha !== 'number') gPointItem(P.adapter);
+        else gMoveTo(P.adapter.localToWorld(new THREE.Vector3(0, 0.03, 0)), top);
+      } else { if (ha !== 'mouse') gPointItem(P.adapter); gRing(top, YAXIS, 0.8); }
+      break;
+    }
+    case 'sadapt': {
+      const sadTop = sadTopWorld(), up = frameOf(P.sad).up;
+      if (P.twist?.mode === 'sadapt') { gRot(sadTop.clone().addScaledVector(up, 0.03), up); break; }
+      if (vr) {
+        if (!isHeldNum(P.sad)) gPointItem(P.sad);
+        else if (!isHeldNum(S)) gPointItem(S);
+        else { gMoveTo(syrTipWorld(), sadTop); gRing(sadTop, up, 0.5); }
+      } else { if (!heldBy(S)) gPointItem(S); gRing(sadTop, up, 0.5); }
+      break;
+    }
+    case 'ar_puxar': if (vr && !isHeldNum(S)) gPointItem(S); else gPull(); break;
+    case 'conectar': {
+      const l = luerWorld();
+      if (!heldBy(S)) gPointItem(S);
+      else gMoveTo(syrTipWorld(), l);
+      gRing(l, vialFrame().up, 0.55);
+      break;
+    }
+    case 'ar_injetar': if (vr && !isHeldNum(V)) gPointItem(V); else if (vialInverted()) gFlip(); else gPush(); break;
+    case 'inverter': if (vr && !isHeldNum(V)) gPointItem(V); else gFlip(); break;
+    case 'aspirar': if (vr && !isHeldNum(V)) gPointItem(V); else if (!vialInverted()) gFlip(); else gPull(); break;
+    case 'bolhas':
+      if (P.syr.air > 0.02) gPush(); else if (P.syr.liq < ALVO_ML - 0.1) gPull(); else if (P.syr.liq > ALVO_ML + 0.1) gPush();
+      break;
+    case 'desconectar': if (vr && !isHeldNum(V)) gPointItem(V); else gRot(luerWorld().addScaledVector(vialFrame().up, 0.02), vialFrame().up); break;
+    case 'bolsa_con': {
+      const pw = portWorld();
+      if (!heldBy(S)) gPointItem(S); else gMoveTo(syrTipWorld(), pw.p);
+      gRing(pw.p, pw.axis, 0.55);
+      break;
+    }
+    case 'injetar': gPush(); break;
+    case 'bolsa_desc':
+      if (vr) { const ax = syrUp(); gMove(S.localToWorld(new THREE.Vector3(0, 0.03, 0)), ax, 0.07); } else gPointItem(S);
+      break;
+    case 'rotular': {
+      const bp = P.bag.localToWorld(new THREE.Vector3(-0.02, 0.022, 0));
+      if (!heldBy(P.label)) gPointItem(P.label); gRing(bp, YAXIS, 1.2);
+      break;
+    }
+    case 'embalar': {
+      const tp = new THREE.Vector3(TRAY.x, TRAY.y + 0.007, TRAY.z);
+      if (!heldBy(P.bag)) gPointItem(P.bag); gRing(tp, YAXIS, 2);
+      break;
+    }
+    case 'descartar': {
+      const wp = new THREE.Vector3(WASTE.x, WASTE.y + WASTE.h + 0.005, WASTE.z);
+      const list = [V, S, P.pad].filter(o => o && !P.discarded.has(o));
+      const held = list.find(o => items.includes(o) && heldBy(o));
+      if (held) { gRing(wp, YAXIS, 1.6); gMove(wp.clone().add(new THREE.Vector3(0, 0.1, 0)), new THREE.Vector3(0, -1, 0), 0.07); break; }
+      const next = list.find(o => items.includes(o));
+      if (next) gPointItem(next); else if (P.padSheet) gPoint(P.padSheet.position.clone().setY(table.top + 0.004));
+      gRing(wp, YAXIS, 1.6);
+      break;
+    }
+    case 'aguardar': if (!capelaOn) gPoint(powerBtn.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 0.025, 0.01))); break;
+  }
+}
+function updateGuides() {
+  for (const k in G) { gUse[k] = 0; for (const m of G[k]) m.visible = false; }
+  if (!guidesOn || P.allDone || !P.vial) return;
+  try { guideStep(); } catch (e) { /* item ainda não existe neste passo */ }
+}
+const guideBtn = document.getElementById('guideBtn');
+if (guideBtn) guideBtn.onclick = () => { guidesOn = !guidesOn; guideBtn.textContent = guidesOn ? 'Setas-guia: ligadas' : 'Setas-guia: desligadas'; };
 
 spawnProcedure();
 
 buildStaticPhysics();
 
-window.game = { holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, connectSyringe, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
@@ -2347,19 +3110,21 @@ renderer.setAnimationLoop(() => {
     updateLocomotion(dt);
     trackHistory(time);
     const next = new Set();
+    let plungerHover = false;
     for (let i = 0; i < 2; i++) {
       if (!sources[i]) continue;
       const glove = isHand[i] ? glovesHand[i] : glovesCtrl[i];
       gloveFlash[i] = Math.max(0, gloveFlash[i] - dt * 3);
       if (held[i] || sashHeldBy === i || P.plunger?.hand === i || P.twist?.hand === i) { glove.feedback('segurando', 1, gloveFlash[i], dt); continue; }
       anchorFor(i).getWorldPosition(_p);
-      const it = nearestItem(_p, isHand[i] ? HAND_REACH : 0.07);
+      const it = nearestItem(_p, isHand[i] ? HAND_REACH : 0.07, null, i);
       if (it) next.add(it);
       // algo ao alcance: item, alça do vidro ou botões
       const near = !!it || handleDistance(_p) < 0.07 ||
         (powerBtn && _p.distanceTo(powerBtn.getWorldPosition(_btn)) < 0.06) ||
         (resetBtn && _p.distanceTo(resetBtn.getWorldPosition(_btn)) < 0.07) ||
-        (P.syringeOn && (() => { const sp = syringePoints(); return _p.distanceTo(sp.thumb) < 0.045 || _p.distanceTo(sp.barrel) < 0.05; })());
+        !!syringeZone(i, _p);
+      if (syringeZone(i, _p) === 'plunger') plungerHover = true;
       // quanto a mão já fechou (0 = aberta, 1 = no ponto de pegar)
       const closeness = isHand[i]
         ? THREE.MathUtils.clamp((FIST_OPEN + 0.35 - fistRatio[i]) / (FIST_OPEN + 0.35 - FIST_CLOSE), 0, 1)
@@ -2367,9 +3132,10 @@ renderer.setAnimationLoop(() => {
       glove.feedback(near ? 'perto' : 'livre', closeness, gloveFlash[i], dt);
     }
     applyHighlights(next);
+    setPlungerGlow(plungerHover && !P.plunger);      // o êmbolo acende: é ele que a mão livre vai pegar
   }
   stepPhysics(dt);
-  updateProcedure(dt);
+  updateProcedure(Math.min(raw, 0.25));                  // timers do procedimento em tempo real
   updateCapela(dt, time);
   updateResetButton(dt);
   updateTutorial(Math.min(raw, 0.5));   // tempo real (não desacelera se o quadro atrasar)
