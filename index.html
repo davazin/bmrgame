@@ -82,7 +82,7 @@
   <div id="msg"></div>
   <details>
     <summary>Controles</summary>
-    <p><b>No Quest:</b> botão lateral (grip) segura com a mão; gatilho pinça e faz as ações finas (êmbolo, rasgar o AlcoolPrep). As mãos não atravessam as bancadas (sem controle: feche a mão para pegar e abra para soltar). Analógico esquerdo anda, direito gira 30°. Botão A/X ou o botão azul REINICIAR da mesa reiniciam os itens; B/Y pula o tutorial. Toque o botão verde da capela com o dedo para ligar; segure a alça prateada para mover o vidro.</p>
+    <p><b>No Quest:</b> botão lateral (grip) fecha os 3 dedos e segura com a mão; gatilho fecha o indicador; A/X fecha o polegar. Gatilho + A/X = pinça firme (êmbolo, aba do AlcoolPrep). Um item na mão não passa direto para a outra: solte na bancada antes. As mãos não atravessam as bancadas (sem controle: feche a mão para pegar e abra para soltar). Analógico esquerdo anda, direito gira 30°. Segure B/Y por 2 s ou use o botão azul REINICIAR da mesa para reiniciar; B/Y pula o tutorial; clique no analógico esquerdo para recentralizar sentado. Toque o botão verde da capela com o dedo para ligar; segure a alça prateada para mover o vidro.</p>
     <p><b>No PC:</b> clique e arraste um item para movê-lo; solte para ele cair. A roda do mouse gira o item enquanto arrasta. Clique no botão verde para ligar a capela e arraste a alça do vidro. Arraste o fundo para girar a câmera.</p>
   </details>
 </div>
@@ -108,6 +108,10 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
+// [REVISÃO] nitidez no Quest 3: framebuffer 30% maior e foveação leve (o padrão do three r160 é a máxima, 1.0)
+renderer.xr.setFramebufferScaleFactor(1.3);
+renderer.xr.setFoveation(0.35);
+THREE.Texture.DEFAULT_ANISOTROPY = 8;                // rótulos, painel e sachê nítidos mesmo vistos de lado
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -125,13 +129,13 @@ rig.add(camera);
 scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa3ab, 0.75));
 const sun = new THREE.DirectionalLight(0xffffff, 1.5);
 sun.position.set(0.6, 2.75, 0.8);
-sun.target.position.set(0, 0, -0.6); scene.add(sun.target);
+sun.target.position.set(0.3, 0.6, -0.5); scene.add(sun.target);
 for (const [x, z] of [[-1.8, 0.4], [1.8, 0.4]]) {
   const p = new THREE.PointLight(0xfff8f0, 3, 6, 2); p.position.set(x, 2.6, z); scene.add(p);
 }
 sun.castShadow = true;
-sun.shadow.mapSize.set(1024, 1024);
-Object.assign(sun.shadow.camera, { left: -3.2, right: 3.2, top: 3.2, bottom: -3.2, near: 0.1, far: 6 });
+sun.shadow.mapSize.set(2048, 2048);                 // [REVISÃO] sombra concentrada na área de trabalho: ~1,7 mm por pixel (antes ~6 mm)
+Object.assign(sun.shadow.camera, { left: -1.7, right: 1.7, top: 1.7, bottom: -1.7, near: 0.1, far: 6 });
 sun.shadow.bias = -0.0005;
 scene.add(sun);
 
@@ -377,7 +381,7 @@ function makeTable({ x, z, w, d, h, color, isTarget }) {
   const g = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ color, roughness: .35, metalness: .7 });  // mesa auxiliar em inox
   const top = new THREE.Mesh(new THREE.BoxGeometry(w, 0.04, d), mat);
-  top.position.y = h - 0.02; top.castShadow = top.receiveShadow = true; g.add(top);
+  top.position.y = h - 0.02; top.castShadow = top.receiveShadow = true; top.userData.brush = true; g.add(top);
   const legGeo = new THREE.BoxGeometry(0.05, h - 0.04, 0.05);
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
     const leg = new THREE.Mesh(legGeo, mat);
@@ -538,9 +542,13 @@ function makeItemBody(item) {
     shapes = [{ type: 'box', half: size.multiplyScalar(0.5).toArray(), pos: ctr.toArray() }];
     com = ctr;
   }
-  const body = new CANNON.Body({ mass: u.mass || 0.05, material: matItem, linearDamping: 0.08, angularDamping: 0.35,
+  // [REVISÃO] itens leves (papel/alumínio < 6 g) sofrem resistência do ar: caem "planando", não como pedra
+  const light = (u.mass || 0.05) < 0.006;
+  const body = new CANNON.Body({ mass: u.mass || 0.05, material: matItem, linearDamping: light ? 0.65 : 0.08, angularDamping: light ? 0.75 : 0.35,
     sleepSpeedLimit: 0.04, sleepTimeLimit: 0.4 });
-  for (const s of shapes) {
+  for (const s0 of shapes) {
+    // [REVISÃO] colisores finos demais atravessam paredes (sem colisão contínua): espessura mínima de 5 mm só na física
+    const s = s0.type === 'box' ? { ...s0, half: s0.half.map(h => Math.max(h, 0.0025)) } : s0;
     const off = new CANNON.Vec3(s.pos[0] - com.x, s.pos[1] - com.y, s.pos[2] - com.z);
     if (s.type === 'cyl') {
       const q = new CANNON.Quaternion();
@@ -750,6 +758,8 @@ const held = [null, null], presses = [0, 0], isHand = [false, false], sources = 
 const grips = [], hands = [], anchors = [], pinchAnchors = [], history = [[], []];
 const glovesCtrl = [], glovesHand = [], curls = [0.25, 0.25];
 const physHand = [], ctrlPalm = [], ctrlPinch = [], ctrlBtn = [{ grip: false, trig: false }, { grip: false, trig: false }];
+const ctrlFirm = [false, false], axLatch = [false, false];
+const firmPinch = i => isHand[i] || ctrlFirm[i];   // mãos rastreadas: a pinça real já é firme
 const handPress = [0, 0], fingerCurl = [[0.2, 0.2, 0.2, 0.2, 0.2], [0.2, 0.2, 0.2, 0.2, 0.2]], pinchAmt = [0, 0];
 const _p = new THREE.Vector3();
 
@@ -846,7 +856,7 @@ function pinchGrab(i) {
   const p = pinchAnchors[i].getWorldPosition(new THREE.Vector3());
   if (procGrab(i, p)) return true;
   const s = P.syringe;
-  if (s && !P.syrOn && items.includes(s) && _box.setFromObject(s).distanceToPoint(p) < 0.035) { holdItem(i, s); return true; }
+  if (s && !P.syrOn && items.includes(s) && !otherHandHolds(s, i) && _box.setFromObject(s).distanceToPoint(p) < 0.035) { holdItem(i, s); return true; }   // [REVISÃO] não rouba da outra mão
   return false;
 }
 // seringa na pinça: o corpo passa entre o polegar e o indicador e deita ao longo do indicador, bico para a frente
@@ -863,6 +873,7 @@ function penPose(i) {
 
 function updateHands(dt) {
   for (let i = 0; i < 2; i++) {
+    updateAttachAnim(i, dt);                       // [REVISÃO]
     const src = sources[i];
     if (!src) { glovesCtrl[i].group.visible = glovesHand[i].group.visible = false; continue; }
     const left = src.handedness === 'left';
@@ -923,22 +934,37 @@ function grab(i, mode) {
 }
 function holdItem(i, item) {
   const a = anchorFor(i), u = item.userData;
+  // [REVISÃO] TRAVA: um item na mão nunca passa direto para a outra mão; é preciso soltá-lo na bancada antes
+  if (typeof u.heldBy === 'number' && u.heldBy !== i) { pulse(i, 0.15, 15); return false; }
   SFX.pegar(item.getWorldPosition(new THREE.Vector3())); tutEvent('grab');
-  if (typeof u.heldBy === 'number') held[u.heldBy] = null;   // passar de uma mão pra outra
   if (dragging === item) { dragging = null; controls.enabled = true; }
   a.attach(item);
   const left = sources[i]?.handedness === 'left';
+  const p0 = item.position.clone(), q0 = item.quaternion.clone();   // [REVISÃO] pose de partida (onde a mão encostou)
   if (!isHand[i]) ctrlPose(i, item, left);   // controle: pose por objeto (mão fechada ou pinça)
   else if (u.gripMode === 'frasco') holdVialPose(item, left, false);   // frasco: pega real, com o topo para fora da mão
   else if ((u.gripMode === 'palma' || u.gripMode === 'lenco') && isHand[i]) {           // gaze / bolsa: espalmada embaixo da mão
     item.quaternion.identity(); item.position.copy(u.grip).multiplyScalar(-1).add(new THREE.Vector3(0, -0.02, 0));
   }
   else if (isHand[i] && u.grip) snapToPalm(item, left);
+  // [REVISÃO] encaixe suave (120 ms) da posição onde a mão encostou até a pose de pega do objeto
+  if (!(isHand[i] && item === P.syringe) && (item.position.distanceTo(p0) > 1e-4 || item.quaternion.angleTo(q0) > 1e-3)) {
+    u.attachAnim = { p0, q0, p1: item.position.clone(), q1: item.quaternion.clone(), t: 0 };
+    item.position.copy(p0); item.quaternion.copy(q0);
+  } else u.attachAnim = null;
   u.heldBy = i; setHeldPhysics(item, true);
   gloveFlash[i] = 1;                       // luva pisca verde: confirma que pegou
   held[i] = item; history[i].length = 0;
   wakeAll();
-  pulse(i, 0.5, 40);
+  const m = u.mass || 0.02;                // [REVISÃO] "peso" na pega: vibração proporcional à massa
+  pulse(i, Math.min(0.9, 0.25 + m * 5), Math.min(90, 25 + m * 400));
+  return true;
+}
+function updateAttachAnim(i, dt) {
+  const it = held[i], a = it?.userData.attachAnim; if (!a) return;
+  a.t = Math.min(1, a.t + dt / 0.12); const e = a.t * a.t * (3 - 2 * a.t);
+  it.position.lerpVectors(a.p0, a.p1, e); it.quaternion.slerpQuaternions(a.q0, a.q1, e);
+  if (a.t >= 1) it.userData.attachAnim = null;
 }
 // Pegada real sem controle: o cabo do instrumento encaixa atravessado na palma,
 // com a ponta (gancho) saindo pelo lado do polegar, como se segura uma ferramenta.
@@ -1032,6 +1058,23 @@ function ctrlPose(i, item, left) {
     return;
   }
   if (u.gripMode === 'frasco' && mode === 'grip') { holdVialPose(item, left, true); return; }
+  // [REVISÃO] OncoSafe: com a mão virada para baixo, o spike aponta para baixo (sai da palma). Pela pinça fica na ponta
+  // dos dedos (~9 cm à frente do controle), o que afasta os dois controles reais na hora de encaixar no frasco.
+  if (item === P.adapter && !P.adapterOn) {
+    _gm.makeBasis(V(0, -1, 0), V(sx, 0, 0), V(0, 0, sx));
+    item.quaternion.setFromRotationMatrix(_gm);
+    const g = V(0, 0.012, 0).applyQuaternion(item.quaternion);
+    if (mode === 'pinch') item.position.copy(g.negate());
+    else item.position.set(-sx * 0.045, -0.02, 0).sub(g);
+    return;
+  }
+  // [REVISÃO] sachê na mão fechada: preso entre polegar e dedos, com a tira do "Rasgue aqui" para fora, do lado do polegar
+  if (isSache(item) && mode === 'grip') {
+    _gm.makeBasis(V(0, -sx, 0), V(-sx, 0, 0), V(0, 0, -1));
+    item.quaternion.setFromRotationMatrix(_gm);
+    item.position.set(-sx * 0.012, -0.004, -0.004).sub(V(0, SACHE_T / 2, 0).applyQuaternion(item.quaternion));
+    return;
+  }
   if (isGauze(item) && mode === 'grip') {              // lenço espalmado na palma: abaixe a mão e esfregue na bancada
     _gm.makeBasis(V(0, -1, 0), V(sx, 0, 0), V(0, 0, sx));
     item.quaternion.setFromRotationMatrix(_gm);
@@ -1040,7 +1083,17 @@ function ctrlPose(i, item, left) {
   }
   // demais itens: ficam na posição em que foram pegos (pega natural)
 }
-const wrapFor = it => isGauze(it) ? 0.35 : it === P.syringe ? 0.85 : it.userData.gripMode === 'frasco' ? 0.75 : (it === P.pad || it === P.bag) ? 0.6 : 0.8;
+// [REVISÃO] curvatura dos dedos pelo tamanho real do objeto (evita dedos atravessando a malha)
+function wrapFor(it) {
+  const u = it.userData;
+  if (!u.dims) { const q = it.quaternion.clone(); it.quaternion.identity(); it.updateMatrixWorld(true);
+    const sz = new THREE.Box3().setFromObject(it).getSize(new THREE.Vector3()); it.quaternion.copy(q); it.updateMatrixWorld(true);
+    u.dims = [sz.x, sz.y, sz.z].sort((a, b) => a - b); }
+  if (isGauze(it)) return 0.35;
+  const [a, b] = u.dims;
+  if (a < 0.008) return 0.5;                               // plano (sachê, etiqueta, campo): dedos meio fechados
+  return THREE.MathUtils.clamp(1.0 - (b - 0.012) * 8, 0.45, 0.92);   // Ø2 cm (frasco) ≈ 0.92 … Ø6 cm ≈ 0.6
+}
 function triggerWhileHolding(i) {                     // gatilho com algo na mão fechada: dica do que fazer
   const h = held[i];
   if (h === P.syringe || (h === P.vial && P.syrOn)) setHint('Use o gatilho da OUTRA mão para pinçar o êmbolo.', 2500);
@@ -1058,9 +1111,27 @@ function surfaceLift(w, r) {
   }
   return lift;
 }
+// [REVISÃO] filtro anti-tremor "One Euro": suaviza só os movimentos lentos (alinhamento fino), não os rápidos (arremesso).
+// Segurando peças de precisão o filtro aperta; peças pesadas ganham um leve atraso ("peso").
+const oeF = [{ p: null, q: new THREE.Quaternion(), v: new THREE.Vector3() }, { p: null, q: new THREE.Quaternion(), v: new THREE.Vector3() }];
+const oeAlpha = (dt, cut) => 1 / (1 + 1 / (2 * Math.PI * cut * Math.max(dt, 1e-3)));
+const PRECISION = it => it && (it === P.syringe || it === P.adapter || it === P.sad || (it === P.vial && (P.syrOn || !P.adapterOn)));
+function filterHand(i, pos, quat, dt) {
+  const f = oeF[i], h = held[i];
+  if (!f.p) { f.p = pos.clone(); f.q.copy(quat); return; }
+  const raw = pos.clone().sub(f.p).divideScalar(Math.max(dt, 1e-3));
+  f.v.lerp(raw, oeAlpha(dt, 1.2));
+  const minCut = PRECISION(h) || P.twist?.hand === i || P.adIns ? 1.1 : (h?.userData.mass || 0) > 0.05 ? 1.6 : 3.5;
+  const a = oeAlpha(dt, minCut + 0.9 * f.v.length() * 10);
+  f.p.lerp(pos, a); f.q.slerp(quat, a);
+  pos.copy(f.p); quat.copy(f.q);
+}
 function updatePhysHand(i, left, dt) {
   const ph = physHand[i], g = grips[i];
-  ph.position.copy(g.position); ph.quaternion.copy(g.quaternion); ph.updateMatrixWorld(true);
+  ph.position.copy(g.position); ph.quaternion.copy(g.quaternion);
+  filterHand(i, ph.position, ph.quaternion, dt);
+  if (P.tear && P.tear.hand === i && P.tear.lag) ph.position.add(P.tear.lag.clone().applyQuaternion(rig.quaternion.clone().invert()));   // [REVISÃO] resistência visual do rasgo
+  ph.updateMatrixWorld(true);
   const sx = left ? -1 : 1, glove = glovesCtrl[i];
   let lift = 0;
   const probes = [[mir3(PALM_C, sx), 0.02]];          // a palma trava na superfície; os dedos se dobram (alcançam itens finos)
@@ -1082,16 +1153,21 @@ function updateControllerHand(i, src, left, dt) {
   ctrlPinch[i].position.copy(pinchLocal(left));
   const b = src.gamepad?.buttons || [];
   const trig = b[0]?.value || 0, gripV = b[1]?.value || 0;
-  const thumbT = (b[3]?.touched || b[4]?.touched || b[5]?.touched) ? 1 : 0;
+  // [REVISÃO] A (direita) / X (esquerda) articulam o POLEGAR: apertado = polegar fecha; só encostado = polegar apoiado
+  const ax = b[4] || {}, axDown = !!ax.pressed, axTouch = !!ax.touched || axDown;
+  const thumbV = axDown ? 1 : axTouch ? 0.62 : (b[3]?.touched || b[5]?.touched) ? 0.45 : 0.2;
+  ctrlFirm[i] = trig > 0.45 && axTouch;                // pinça firme = gatilho (indicador) + A/X (polegar)
+  if (axDown && !axLatch[i] && ctrlBtn[i].trig && !held[i] && !grabMode[i]) grab(i, 'pinch');   // polegar fecha depois do gatilho
+  axLatch[i] = axDown;
   let tgt, pinchT = 0;
   const h = held[i];
   if (grabMode[i] === 'pinch' || P.plunger?.hand === i || P.tear?.hand === i) {
-    tgt = [PINCH_CURL, 0.4 + 0.4 * gripV, 0.5 + 0.4 * gripV, 0.55 + 0.4 * gripV, 0.6]; pinchT = 1;
-  } else if (h || sashHeldBy === i || P.twist?.hand === i) {
-    const wr = h ? wrapFor(h) : 0.8; tgt = [Math.max(wr, trig), wr, wr, wr, 0.75];
+    tgt = [PINCH_CURL, 0.4 + 0.4 * gripV, 0.5 + 0.4 * gripV, 0.55 + 0.4 * gripV, Math.max(0.6, thumbV)]; pinchT = ctrlFirm[i] ? 1 : 0.7;
+  } else if (h || sashHeldBy === i || P.twist?.hand === i || P.adTw?.hand === i) {
+    const wr = h ? wrapFor(h) : 0.8; tgt = [Math.max(wr, trig), wr, wr, wr, Math.max(0.7, thumbV)];
   } else {                                             // livre: cada dedo segue o botão que ele aperta
-    tgt = [0.12 + 0.85 * trig, 0.18 + 0.8 * gripV, 0.2 + 0.8 * gripV, 0.22 + 0.78 * gripV, thumbT ? 0.65 : 0.25];
-    if (trig > 0.4 && gripV < 0.4) pinchT = Math.min(1, (trig - 0.4) / 0.5) * 0.8;
+    tgt = [0.12 + 0.85 * trig, 0.18 + 0.8 * gripV, 0.2 + 0.8 * gripV, 0.22 + 0.78 * gripV, thumbV];
+    if (trig > 0.4 && gripV < 0.4) pinchT = Math.min(1, (trig - 0.4) / 0.5) * (axTouch ? 1 : 0.55);
   }
   const k = Math.min(1, dt * 18), fc = fingerCurl[i];
   for (let f = 0; f < 5; f++) fc[f] += (tgt[f] - fc[f]) * k;
@@ -1112,7 +1188,12 @@ function release(i) {
   const h = history[i];
   if (h.length >= 2 && u.body) {
     const a = h[0], b = h[h.length - 1], dt = Math.max(1e-3, b.t - a.t);
-    const v = new THREE.Vector3().subVectors(b.p, a.p).divideScalar(dt);
+    // [REVISÃO] mediana das velocidades quadro a quadro: um pico isolado (tremor/rastreamento) não vira arremesso
+    const vs = [];
+    for (let k = 1; k < h.length; k++) vs.push(h[k].p.clone().sub(h[k - 1].p).divideScalar(Math.max(1e-3, h[k].t - h[k - 1].t)));
+    const med = ax => { const arr = vs.map(q => q[ax]).sort((x, y) => x - y); return arr[arr.length >> 1]; };
+    const v = new THREE.Vector3(med('x'), med('y'), med('z'));
+    if (handPress[i] > 0.002) v.y = Math.min(v.y, 0);   // mão apoiada na bancada: a correção da "mão física" não vira pulo
     if (v.length() > 8) v.setLength(8);
     u.body.velocity.set(v.x, v.y, v.z);
     const dq = b.q.clone().multiply(a.q.clone().invert());
@@ -1139,7 +1220,7 @@ function trackHistory(time) {
 
 // Locomoção: analógico esquerdo anda, direito gira (snap 30°), A/X reinicia
 const _dir = new THREE.Vector3(), _right = new THREE.Vector3(), _head = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
-let turnLatch = false, resetLatch = false;
+let turnLatch = false, resetLatch = false, resetHoldT = 0;
 function updateLocomotion(dt) {
   const session = renderer.xr.getSession(); if (!session) return;
   const xrCam = renderer.xr.getCamera();
@@ -1166,10 +1247,11 @@ function updateLocomotion(dt) {
         tutEvent('move');
       } else if (Math.abs(x) < 0.3) turnLatch = false;
     }
-    if (gp.buttons[4]?.pressed) aPressed = true;
+    if (gp.buttons[5]?.pressed) aPressed = true;      // [REVISÃO] B/Y (A/X agora é o polegar da pinça)
   }
-  if (aPressed && !resetLatch) { resetLatch = true; resetItems(); }
-  else if (!aPressed) resetLatch = false;
+  // [REVISÃO] reiniciar só segurando B/Y por 2 s (evita apagar o procedimento sem querer)
+  if (aPressed && tut.step < 0) { resetHoldT += dt; if (resetHoldT > 2 && !resetLatch) { resetLatch = true; resetItems(); setHint('Itens reiniciados (B/Y segurado).', 2500); } }
+  else { resetHoldT = 0; resetLatch = false; }
 }
 
 // ===================== [ERGONOMIA] Jogador sentado (cadeira de escritório) =====================
@@ -1200,35 +1282,58 @@ function updateSeat() {
   recenterLatch = press;
 }
 
-// ===================== [PAINEL] Passo a passo perto, com "lazy follow" =====================
-// No VR o painel fica a ~50 cm, um pouco à esquerda e acima da linha dos olhos (sem tapar a capela).
-// Ele só acompanha a cabeça quando ela sai de uma zona de conforto (±28°), e com suavidade.
+// ===================== [PAINEL] Passo a passo DENTRO do campo de visão (revisão) =====================
+// O painel fica acima e à frente do olhar (≈12° acima do horizonte, quase central, a 55 cm), na região do
+// vidro superior da capela: nunca sobre a bancada ou as mãos. "Lazy follow" em 2 eixos com zona de conforto:
+// só acompanha a cabeça quando ela sai de ±20° (giro) e sobe/desce limitado. Ao olhar para baixo (trabalhando),
+// o painel completo vira uma FAIXA COMPACTA só com o passo atual, presa à borda de cima da visão.
 const PANEL_HOME = { pos: panel.position.clone(), rot: panel.rotation.clone() };
-const PANEL_DIST = 0.48, PANEL_SIDE = 0.66, PANEL_UP = 0.05, PANEL_COMFORT = 0.49, PANEL_SCALE = 0.62;
-let panelYaw = null;
+const PANEL_DIST = 0.55, PANEL_SIDE = 0.10, PANEL_COMFORT = 0.35, PANEL_SCALE = 0.5;
+const PANEL_PITCH_MAX = 0.21, PANEL_PITCH_MIN = -0.35, PANEL_PITCH_LEAD = 0.40;
+const miniCanvas = document.createElement('canvas'); miniCanvas.width = 1024; miniCanvas.height = 200;
+const miniTex = new THREE.CanvasTexture(miniCanvas); miniTex.colorSpace = THREE.SRGBColorSpace;
+const panelMini = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.0703), new THREE.MeshBasicMaterial({ map: miniTex, transparent: true, toneMapped: false, depthTest: false, opacity: 0 }));
+panelMini.renderOrder = 31; panelMini.visible = false; scene.add(panelMini);
+function drawMiniPanel(stepNo, total, text, hint, done) {
+  const g = miniCanvas.getContext('2d'), W = 1024, H = 200;
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = done ? 'rgba(30,138,76,0.94)' : 'rgba(16,22,30,0.92)'; g.beginPath(); g.roundRect(4, 4, W - 8, H - 8, 30); g.fill();
+  g.fillStyle = '#ffd600'; g.font = 'bold 40px system-ui, sans-serif'; g.textAlign = 'left';
+  g.fillText(done ? '✓' : `${stepNo}/${total}`, 26, 72);
+  g.fillStyle = '#fff'; g.font = 'bold 42px system-ui, sans-serif'; g.fillText(text, 150, 72, W - 180);
+  if (hint) { g.fillStyle = '#ffcc80'; g.font = 'bold 32px system-ui, sans-serif'; g.fillText('👉 ' + hint, 30, 150, W - 60); }
+  miniTex.needsUpdate = true;
+}
+let panelYaw = null, panelPitch = 0, panelCompact = 0;
 const _phd = new THREE.Vector3(), _pfd = new THREE.Vector3(), _ptg = new THREE.Vector3();
 const wrapAng = a => Math.atan2(Math.sin(a), Math.cos(a));
 function updatePanelFollow(dt) {
   if (!renderer.xr.isPresenting) {
     if (panelYaw !== null || panel.scale.x !== 1) {
       panelYaw = null; panel.position.copy(PANEL_HOME.pos); panel.rotation.copy(PANEL_HOME.rot); panel.scale.setScalar(1);
-      panel.material.depthTest = true; panel.renderOrder = 0;
+      panel.material.depthTest = true; panel.material.opacity = 1; panel.renderOrder = 0; panelMini.visible = false;
     }
     return;
   }
   const xrCam = renderer.xr.getCamera();
   xrCam.getWorldPosition(_phd); xrCam.getWorldDirection(_pfd);
-  const headYaw = Math.atan2(-_pfd.x, -_pfd.z);
+  const headYaw = Math.atan2(-_pfd.x, -_pfd.z), headPitch = Math.asin(THREE.MathUtils.clamp(_pfd.y, -1, 1));
   const first = panelYaw === null;
-  if (first) panelYaw = headYaw;
+  if (first) { panelYaw = headYaw; panelPitch = PANEL_PITCH_MAX; }
   const d = wrapAng(headYaw - panelYaw);
   if (Math.abs(d) > PANEL_COMFORT) panelYaw += (d - Math.sign(d) * PANEL_COMFORT) * (1 - Math.exp(-dt * 3));
-  const yaw = panelYaw + PANEL_SIDE;
-  _ptg.set(_phd.x - Math.sin(yaw) * PANEL_DIST, _phd.y + PANEL_UP, _phd.z - Math.cos(yaw) * PANEL_DIST);
+  const pitchT = THREE.MathUtils.clamp(headPitch + PANEL_PITCH_LEAD, PANEL_PITCH_MIN, PANEL_PITCH_MAX);
+  panelPitch += (pitchT - panelPitch) * (1 - Math.exp(-dt * 2.5));
+  const yaw = panelYaw + PANEL_SIDE, cp = Math.cos(panelPitch);
+  _ptg.set(_phd.x - Math.sin(yaw) * cp * PANEL_DIST, _phd.y + Math.sin(panelPitch) * PANEL_DIST, _phd.z - Math.cos(yaw) * cp * PANEL_DIST);
   if (first) panel.position.copy(_ptg); else panel.position.lerp(_ptg, 1 - Math.exp(-dt * 4));
-  panel.lookAt(_phd);
-  panel.scale.setScalar(PANEL_SCALE);
-  panel.material.depthTest = false; panel.renderOrder = 30;   // sempre legível (não some atrás do vidro)
+  panel.lookAt(_phd); panel.scale.setScalar(PANEL_SCALE);
+  // olhando para baixo (mãos na bancada) → faixa compacta
+  const cT = THREE.MathUtils.smoothstep(-headPitch, 0.28, 0.48);
+  panelCompact += (cT - panelCompact) * (1 - Math.exp(-dt * 6));
+  panel.material.depthTest = false; panel.renderOrder = 30; panel.material.opacity = 1 - panelCompact; panel.visible = panelCompact < 0.98;
+  panelMini.visible = panelCompact > 0.02; panelMini.material.opacity = panelCompact;
+  panelMini.position.copy(panel.position); panelMini.quaternion.copy(panel.quaternion);
 }
 
 // Botão de entrar no VR
@@ -1801,6 +1906,68 @@ function dressSash(parts) {
   sheen.raycast = () => {};                          // reflexo é só visual
 }
 
+// ===================== [REVISÃO] Detalhe visual do laboratório (texturas procedurais, sem downloads) =====================
+function procTex(w, h, draw, rep = [1, 1]) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep[0], rep[1]); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const rnd = seeded(77);
+// inox escovado: riscos finos na direção do polimento
+const brushedTex = procTex(512, 512, (g, W, H) => {
+  g.fillStyle = '#d8dde1'; g.fillRect(0, 0, W, H);
+  for (let k = 0; k < 2600; k++) {
+    const y = rnd() * H, l = 40 + rnd() * 260, x = rnd() * W, v = 190 + Math.floor(rnd() * 65);
+    g.strokeStyle = `rgba(${v},${v + 2},${v + 5},${0.18 + rnd() * 0.25})`; g.lineWidth = 0.6 + rnd();
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + l, y + (rnd() - 0.5) * 1.5); g.stroke();
+  }
+}, [2, 2]);
+const brushedRough = brushedTex.clone(); brushedRough.colorSpace = THREE.NoColorSpace; brushedRough.needsUpdate = true;
+// tampo de resina epóxi (bancadas do laboratório): grafite com leve granulado
+const resinTex = procTex(256, 256, (g, W, H) => {
+  g.fillStyle = '#2b2f34'; g.fillRect(0, 0, W, H);
+  for (let k = 0; k < 2200; k++) { const v = 40 + Math.floor(rnd() * 40); g.fillStyle = `rgba(${v},${v + 3},${v + 6},0.5)`; g.fillRect(rnd() * W, rnd() * H, 1 + rnd() * 1.5, 1 + rnd() * 1.5); }
+}, [6, 2]);
+// chapa perfurada (filtro HEPA, grelhas de exaustão)
+function perfTex(cols, rows, hole, bg, fg) {
+  return procTex(512, 512 * rows / cols, (g, W, H) => {
+    g.fillStyle = bg; g.fillRect(0, 0, W, H); g.fillStyle = fg;
+    const sx = W / cols, sy = H / rows;
+    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) { g.beginPath(); g.arc((i + 0.5 + (j % 2) * 0.5) * sx, (j + 0.5) * sy, hole * sx, 0, Math.PI * 2); g.fill(); }
+  });
+}
+function upgradeLabMaterials() {
+  // mesa de inox e tampos de bancada
+  scene.traverse(o => {
+    if (!o.isMesh || !o.material || Array.isArray(o.material)) return;
+    const m = o.material;
+    if (o.userData.brush && m.isMeshStandardMaterial && !m.map) {
+      m.map = brushedTex; m.roughnessMap = brushedRough; m.roughness = 0.42; m.color.setHex(0xe6eaee); m.needsUpdate = true;   // inox escovado
+    } else if (m.isMeshStandardMaterial && m.color.getHex() === 0x2a2e33 && m.roughness === 0.3 && !m.map && o.geometry.attributes.uv) {
+      m.map = resinTex; m.roughness = 0.45; m.color.setHex(0xffffff); m.needsUpdate = true;                                     // resina epóxi
+    }
+  });
+}
+function decorateCapela(capela) {
+  const add = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.receiveShadow = true; capela.add(m); return m; };
+  // filtro HEPA no teto da área de trabalho (chapa perfurada)
+  const hepa = new THREE.MeshStandardMaterial({ map: perfTex(64, 28, 0.28, '#b8bec4', '#3d4248'), metalness: 0.6, roughness: 0.45 });
+  add(new THREE.PlaneGeometry(1.38, 0.6).rotateX(Math.PI / 2), hepa, 0, 1.276, -0.47);
+  // grelhas de exaustão: borda da frente e fundo da bancada (as "grelhas" do passo de verificação)
+  const slot = new THREE.MeshStandardMaterial({ map: perfTex(120, 6, 0.32, '#c9ced3', '#22262a'), metalness: 0.7, roughness: 0.35 });
+  add(new THREE.PlaneGeometry(1.39, 0.03).rotateX(-Math.PI / 2), slot, 0, 0.5788, -0.104);
+  add(new THREE.PlaneGeometry(1.39, 0.025).rotateX(-Math.PI / 2), slot, 0, 0.5788, -0.758);
+  // lâmpada UV (desligada) na frente do teto
+  const glass = new THREE.MeshStandardMaterial({ color: 0xe9e4ff, emissive: 0x6a4cff, emissiveIntensity: 0.06, roughness: 0.2, transparent: true, opacity: 0.85 });
+  const tube = add(new THREE.CylinderGeometry(0.008, 0.008, 1.1, 14).rotateZ(Math.PI / 2), glass, 0, 1.25, -0.2);
+  const cap = new THREE.MeshStandardMaterial({ color: 0xd9dde1, metalness: 0.8, roughness: 0.3 });
+  for (const x of [-0.56, 0.56]) add(new THREE.CylinderGeometry(0.011, 0.011, 0.03, 14).rotateZ(Math.PI / 2), cap, x, 1.25, -0.2);
+  tube.castShadow = false;
+  // trilhos laterais do vidro móvel
+  const rail = new THREE.MeshStandardMaterial({ color: 0xf0f3f5, metalness: 1, roughness: 0.16 });
+  for (const x of [-0.693, 0.693]) add(new THREE.BoxGeometry(0.01, 0.95, 0.016), rail, x, 1.06, -0.096);
+}
+
 function setupCapela(capela) {
   capelaRef = capela;
   // vidro + caixilho viram uma peça só, que desliza na vertical
@@ -1839,6 +2006,7 @@ function setupCapela(capela) {
   airflow.frustumCulled = false; airflow.visible = false; capela.add(airflow);
 
   lamp.intensity = 0.25;
+  decorateCapela(capela); upgradeLabMaterials();       // [REVISÃO] visual
   drawDisplay(true);
   if (actx.state === 'running') startLoops();
 }
@@ -1986,7 +2154,7 @@ const TUT = [
   { id: 'move', vr: 'Analógico esquerdo: andar\nAnalógico direito: girar', hand: 'Olhe em volta: você pode\ncaminhar pelo espaço real.',
     pc: 'Arraste o fundo com o mouse para girar\ne use a roda para aproximar.', ev: 'move', auto: 7 },
   { id: 'power', vr: 'Ligue a capela: toque com o dedo\nno botão verde ao lado do logo.', pc: 'Clique no botão verde ao lado\ndo logo para ligar a capela.', ev: 'power' },
-  { id: 'grab', vr: 'Pegue um item na mesa de inox:\naproxime a mão e aperte o botão lateral (grip).\nO gatilho é a pinça: êmbolo e rasgar.', hand: 'Pegue um item na mesa de inox:\nfeche a mão sobre ele.',
+  { id: 'grab', vr: 'Pegue um item na mesa de inox:\naproxime a mão e aperte o botão lateral (grip).\nPinça firme = gatilho + polegar no A/X.', hand: 'Pegue um item na mesa de inox:\nfeche a mão sobre ele.',
     pc: 'Clique e arraste um item\nda mesa de inox.', ev: 'grab' },
   { id: 'place', all: 'Leve o item para dentro\nda capela e solte sobre a bancada.', ev: 'place' },
   { id: 'sash', vr: 'Segure a alça prateada do vidro com o grip\ne mova a mão para subir ou descer.', hand: 'Feche a mão na alça prateada\ndo vidro e mova a mão.',
@@ -2158,6 +2326,26 @@ function updateResetButton(dt) {
   resetPress = Math.max(0, resetPress - dt * 2.5);
   resetBtn.position.y = 0.052 - 0.005 * Math.min(1, resetPress * 3);
   resetMat.emissiveIntensity = resetPress * 1.5;
+}
+
+// ===================== [REVISÃO] Feedback central: som + vibração sincronizados =====================
+// Cada evento dispara o som (Web Audio, posicional) e o padrão de vibração nas mãos certas, no mesmo quadro.
+const FX = {
+  align:   { snd: (o, t) => { tone(o, t, 1320, 0.05, 0.05, 'sine'); },                                hap: [0.25, 25] },
+  tension: { snd: (o, t, k) => { noiseHit(o, t, 1800 + 2500 * k, 2.5, 0.03, 0.02 + 0.05 * k); },      hap: k => [0.08 + 0.5 * k, 22] },
+  tear:    { snd: (o, t, k) => { for (let g = 0; g < 4; g++) noiseHit(o, t + g * 0.012 + Math.random() * 0.01, 4000 + Math.random() * 4000, 3, 0.012, 0.05 + 0.08 * k); }, hap: k => [0.35 + 0.5 * k, 18] },
+  rip:     { snd: (o, t) => { for (let g = 0; g < 14; g++) noiseHit(o, t + g * 0.016 + Math.random() * 0.008, 3000 + Math.random() * 6000, 2.5, 0.02, 0.12); noiseHit(o, t, 900, 1, 0.08, 0.08); }, hap: [0.95, 80] },
+  press:   { snd: (o, t, k) => { noiseHit(o, t, 500 + 400 * k, 4, 0.03, 0.015 + 0.03 * k); },          hap: k => [0.12 + 0.55 * k, 22] },
+  pop:     { snd: (o, t) => { noiseHit(o, t, 700, 2, 0.04, 0.18); tone(o, t, 300, 0.05, 0.06, 'triangle'); }, hap: [0.6, 40] },
+  snap:    { snd: (o, t) => { noiseHit(o, t, 3800, 6, 0.012, 0.35); tone(o, t, 2100, 0.03, 0.12, 'square'); tone(o, t, 900, 0.05, 0.08, 'triangle', 0.01); }, hap: [1.0, 70] },
+  ratchet: { snd: (o, t) => { noiseHit(o, t, 5200, 8, 0.008, 0.16); tone(o, t, 2600, 0.012, 0.05, 'square'); }, hap: [0.35, 14] },
+  seated:  { snd: (o, t) => { tone(o, t, 880, 0.09, 0.08, 'sine'); tone(o, t, 1320, 0.12, 0.08, 'sine', 0.08); }, hap: [0.7, 90] },
+};
+function fx(name, pos, hands = [0, 1], k = 1) {
+  const e = FX[name]; if (!e) return;
+  if (pos) sfxAt(pos, (o, t) => e.snd(o, t, k));
+  const h = typeof e.hap === 'function' ? e.hap(k) : e.hap;
+  for (const i of hands) if (typeof i === 'number') pulse(i, Math.min(1, h[0]), h[1]);
 }
 
 // ===================== Procedimento completo em sistema fechado (CSTD) =====================
@@ -2396,6 +2584,12 @@ const WASTE = { x: 0.52, z: CZ - 0.205, w: 0.14, d: 0.14, h: 0.15, y: 0.578 };  
     c.font = '18px system-ui, sans-serif'; c.fillText('descartar sem desmontar', W / 2, 114);
   }));
   lab.position.set(0, H * 0.6, WASTE.d / 2 + 0.001); box.add(lab);
+})();
+// [REVISÃO] paredes do coletor com 15 mm na física (6 mm visuais + 9 mm por fora): itens rápidos não atravessam
+(function thickenWasteWalls() {
+  const t = 0.009, x0 = WASTE.x - WASTE.w / 2, x1 = WASTE.x + WASTE.w / 2, z0 = WASTE.z - WASTE.d / 2, z1 = WASTE.z + WASTE.d / 2, y0 = WASTE.y, y1 = WASTE.y + WASTE.h;
+  colliders.push(new THREE.Box3(V3(x0 - t, y0, z0 - t), V3(x1 + t, y1, z0)), new THREE.Box3(V3(x0 - t, y0, z1), V3(x1 + t, y1, z1 + t)),
+    new THREE.Box3(V3(x0 - t, y0, z0), V3(x0, y1, z1)), new THREE.Box3(V3(x1, y0, z0), V3(x1 + t, y1, z1)));
 })();
 function overWaste(p, margin = 0) {
   return Math.abs(p.x - WASTE.x) < WASTE.w / 2 - 0.008 + margin && Math.abs(p.z - WASTE.z) < WASTE.d / 2 - 0.008 + margin;
@@ -2703,12 +2897,14 @@ function openSache(S, hand) {
   env.quaternion.copy(q); syncBodyFromItem(env); env.userData.trash = true;
   const strip = addProcItem(buildSacheStrip(), 'Tira rasgada do AlcoolPrep', sPos, 'strip', 'plastico');
   strip.quaternion.copy(sQ); syncBodyFromItem(strip); strip.userData.trash = true;
-  const out = new THREE.Vector3(0.35, 0, 1).normalize().applyQuaternion(q);       // a tira sai para o lado do rasgo
-  if (strip.userData.body) { const b = strip.userData.body; b.velocity.set(out.x * 0.45, 0.55, out.z * 0.45); b.angularVelocity.set(3 * out.z, 4, -3 * out.x); }
   P.trash.push(env, strip);
   if (typeof hand === 'number' && typeof holder === 'number') holdItem(holder, env);
-  sfxTear(pos);
-  if (typeof hand === 'number') for (let i = 0; i < 2; i++) pulse(i, 0.8, 70);
+  if (typeof hand === 'number') holdItem(hand, strip);    // [REVISÃO] a tira rasgada fica na mão que pinçou a aba
+  else {                                                 // PC: a tira se solta e cai ao lado
+    const out = new THREE.Vector3(0.35, 0, 1).normalize().applyQuaternion(q);
+    if (strip.userData.body) { const b = strip.userData.body; b.velocity.set(out.x * 0.45, 0.55, out.z * 0.45); b.angularVelocity.set(3 * out.z, 4, -3 * out.x); }
+  }
+  fx('rip', pos, typeof hand === 'number' ? [hand, holder] : []);
   // lenço aparecendo: desliza para fora da boca da embalagem
   const swab = buildGauze(); swab.rotation.y = Math.PI / 2; swab.scale.set(1, 0.7, 1);
   env.children[0].add(swab);
@@ -2717,32 +2913,67 @@ function openSache(S, hand) {
   P.tear = null;
   addAnim(0.45, u => { const e = easeOut3(u); swab.position.z = z0 + (z1 - z0) * e; swab.position.y = SACHE_T / 2 - 0.0008 + 0.004 * e; swab.rotation.x = -0.25 * e; },
     () => {
-      swab.updateMatrixWorld(true);
-      const wp = swab.getWorldPosition(new THREE.Vector3()), wq = swab.getWorldQuaternion(new THREE.Quaternion());
-      swab.parent?.remove(swab);
-      const g = spawnGauze(wp); g.quaternion.copy(wq); syncBodyFromItem(g);
-      if (typeof hand === 'number') { if (!held[hand] && (isHand[hand] || grabMode[hand] === 'pinch')) holdItem(hand, g); }
-      else if (hand === 'mouse' && P.tearMouse) { controls.enabled = true; startMouseDragAt(g); }
+      if (typeof hand === 'number') {                    // [REVISÃO] VR: o lenço fica exposto; solte a tira e pince o lenço
+        P.swabVis = { m: swab, env };
+        setHint('Solte a tira e pince o lenço que ficou para fora da embalagem.', 4000);
+        return;
+      }
+      const g = swabToItem(swab);
+      if (hand === 'mouse' && P.tearMouse) { controls.enabled = true; startMouseDragAt(g); }
     });
 }
 // VR: uma mão segura o sachê, a outra pinça/fecha na borda e puxa para longe
+// [REVISÃO] aba do rasgo: esfera tolerante na tira do "Rasgue aqui" (não vale pinçar o corpo do pacote)
+function tabWorld(S) { return S.localToWorld(new THREE.Vector3(SACHE_W * 0.32, SACHE_T, tearZ + (SACHE_W / 2 - tearZ) / 2)); }
 function tearStart(i, p) {
   const o = 1 - i, S = held[o];
   if (!isSache(S) || typeof S.userData.heldBy !== 'number') return false;
-  if (S.getWorldPosition(new THREE.Vector3()).distanceTo(p) > 0.08) return false;
-  P.tear = { s: S, hand: i, other: o, d0: handWorld(i).p.distanceTo(handWorld(o).p), lastK: 0 };
-  gloveFlash[i] = 1; pulse(i, 0.4, 25);
+  if (tabWorld(S).distanceTo(p) > (isHand[i] ? 0.05 : 0.035)) return false;
+  if (!firmPinch(i)) { setHint('Pinça firme na aba: gatilho + polegar no A/X.', 2500); return false; }
+  const hp0 = isHand[i] ? handWorld(i).p : rig.localToWorld(grips[i].position.clone());   // posição real do controle (mesma medida do puxão)
+  P.tear = { s: S, hand: i, other: o, d0: hp0.distanceTo(handWorld(o).p), lastK: -1, hapT: 0, lag: null };
+  gloveFlash[i] = 1; fx('tension', tabWorld(S), [i], 0.1);
   return true;
 }
+// lenço exposto → item de verdade
+function swabToItem(swab) {
+  swab.updateMatrixWorld(true);
+  const wp = swab.getWorldPosition(new THREE.Vector3()), wq = swab.getWorldQuaternion(new THREE.Quaternion());
+  swab.parent?.remove(swab);
+  const g = spawnGauze(wp); g.quaternion.copy(wq); syncBodyFromItem(g);
+  if (P.swabVis?.m === swab) P.swabVis = null;
+  return g;
+}
+function updateSwab() {                                // embalagem solta com o lenço dentro: o lenço sai junto (não se perde)
+  const sv = P.swabVis; if (!sv) return;
+  if (!items.includes(sv.env) || (!heldOrMouse(sv.env) && sv.env.userData.body)) swabToItem(sv.m);
+}
+// [REVISÃO] rasgo em 3 fases: (1) tensão elástica até 1,5 cm — a luva "fica para trás" (resistência), a tira
+// verga e a vibração sobe; (2) ruptura de 1,5 a 4 cm — o rasgo corre pela linha com estalos granulados;
+// (3) separação — a tira fica na mão que pinçou e o lenço aparece na boca da embalagem.
+const TEAR_ELASTIC = 0.015, TEAR_FULL = 0.04;
 function updateTear() {
   const t = P.tear; if (!t || typeof t.hand !== 'number') return;
   if (held[t.other] !== t.s) { setTearVisual(t.s, 0); P.tear = null; return; }
-  const d = handWorld(t.hand).p.distanceTo(handWorld(t.other).p), k = (d - t.d0) / 0.035;
-  P.hint = 'Puxe para rasgar o pacote…';
-  setTearVisual(t.s, k);                               // [RASGO] a tira descasca conforme as mãos se afastam
-  const step = Math.floor(Math.max(0, k) * 4);
-  if (step > t.lastK) { t.lastK = step; pulse(t.hand, 0.35, 20); pulse(t.other, 0.25, 20); sfxAt(t.s.getWorldPosition(new THREE.Vector3()), (o, tt) => noiseHit(o, tt, 7000, 3, 0.02, 0.08)); }
-  if (k >= 1) openSache(t.s, t.hand);
+  const hp = rig.localToWorld(grips[t.hand].position.clone()), op = handWorld(t.other).p;   // posição real do controle (sem o atraso visual)
+  if (isHand[t.hand]) hp.copy(handWorld(t.hand).p);
+  const pull = hp.distanceTo(op) - t.d0, dir = op.clone().sub(hp).normalize(), tab = tabWorld(t.s);
+  t.hapT -= 1 / 72;
+  if (pull < TEAR_ELASTIC) {
+    const e = Math.max(0, pull) / TEAR_ELASTIC;
+    setTearVisual(t.s, 0.12 * e);
+    t.lag = dir.multiplyScalar(Math.max(0, pull) * 0.6);          // a luva resiste: fica 60% para trás
+    if (t.hapT <= 0) { t.hapT = 0.04; fx('tension', tab, [t.hand, t.other], e); }
+    P.hint = 'Puxe firme: o alumínio está esticando…';
+  } else {
+    const k = Math.min(1, (pull - TEAR_ELASTIC) / (TEAR_FULL - TEAR_ELASTIC));
+    setTearVisual(t.s, 0.12 + 0.88 * k);
+    t.lag = dir.multiplyScalar(TEAR_ELASTIC * 0.6 * (1 - k));
+    const step = Math.floor(k * 8);
+    if (step > t.lastK) { t.lastK = step; fx('tear', tab, [t.hand, t.other], k); }
+    P.hint = 'Rasgando…';
+    if (k >= 1) { t.lag = null; openSache(t.s, t.hand); }
+  }
 }
 
 function spawnProcedure() {
@@ -2768,7 +2999,7 @@ function spawnProcedure() {
   P.syringe.userData.home.q.copy(P.syringe.quaternion); syncBodyFromItem(P.syringe);
   P.bag = addProcItem(buildBag(), 'Bolsa SF 0,9% 100 mL', new THREE.Vector3(0.88, T + 0.001, -0.15), 'bag', 'plastico',
     { grip: new THREE.Vector3(0, 0.01, 0), gripMode: 'palma' });
-  P.gauzes = []; P.saches = []; P.trash = []; P.anims = []; P.tear = null; P.tearMouse = null; P.padTwo = null; P.padAnim = false; if (padPreview) padPreview.visible = false;   // 5 sachês AlcoolPrep fechados (sobram se algum lenço cair)
+  P.gauzes = []; P.saches = []; P.trash = []; P.anims = []; P.tear = null; P.tearMouse = null; P.padTwo = null; P.padAnim = false; P.adSeated = false; P.adSeat = null; P.adTw = null; P.adIns = null; P.swabVis = null; if (padPreview) padPreview.visible = false;   // 5 sachês AlcoolPrep fechados (sobram se algum lenço cair)
   for (let k = 0; k < SACHES_N; k++) spawnSache(new THREE.Vector3(0.57 + (k % 3) * 0.045, T + 0.001, 0.00 + Math.floor(k / 3) * 0.06));
   P.gauze = null;
   P.label = addProcItem(buildLabel(), 'Etiqueta da bolsa', new THREE.Vector3(0.60, T + 0.001, 0.17), 'label', 'plastico');
@@ -2901,8 +3132,85 @@ function lockAdapter() {
   a.updateMatrixWorld(true);
   rebuildBody(v, shapesFor('vial+adapter'));
   P.adapterOn = true;
-  SFX.trava(v.getWorldPosition(new THREE.Vector3()));
-  for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
+  P.adSeated = false; P.adSeat = { cw: false, ccw: false, angle: 0, clicks: 0 };   // [REVISÃO] falta confirmar girando
+  fx('snap', v.localToWorld(new THREE.Vector3(0, SEAT_Y, 0)));
+  // a mão que empurrou continua com os dedos no OncoSafe: já pode girar
+  const ha = P.adIns?.hand, hv = P.vial.userData.heldBy;
+  adapterInsertEnd(true);
+  if (typeof ha === 'number' && typeof hv === 'number' && (ctrlBtn[ha]?.grip || ctrlBtn[ha]?.trig || isHand[ha])) startSeatTwist(ha, hv);
+}
+// ---------- [REVISÃO] OncoSafe: alinhamento assistido e inserção com resistência (VR, duas mãos) ----------
+// Dentro de um cone de ~35° e 3 cm o adaptador é atraído para o eixo do frasco. Ao encostar o spike no septo,
+// a peça desce MENOS que a mão (é preciso empurrar ~3 cm para descer 12 mm), com vibração crescente,
+// um "pop" ao furar o septo e um clique metálico no encaixe.
+const AD_CONTACT = 0.012;
+function adapterInsertVR(ha, hv) {
+  const A = P.adapter, u = A.userData;
+  if (u.natLocal) { A.position.copy(u.natLocal.p); A.quaternion.copy(u.natLocal.q); A.updateMatrixWorld(true); }
+  const al = adapterAlignment();
+  const assist = al.cos > 0.82 && al.lateral < 0.03 && al.axial > -0.05 && al.axial < 0.045;
+  if (!assist) { adapterInsertEnd(); return false; }
+  if (!u.natLocal) u.natLocal = { p: A.position.clone(), q: A.quaternion.clone() };
+  if (!P.adIns) P.adIns = { hand: ha, other: hv, aligned: false, popped: false, hapT: 0 };
+  const ins = P.adIns, { up, q: vq } = vialFrame();
+  const top = P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y, 0));
+  const natSeat = A.localToWorld(new THREE.Vector3()), natQ = A.getWorldQuaternion(new THREE.Quaternion());
+  const kAlign = THREE.MathUtils.smoothstep(0.045 - Math.max(0, al.axial), 0, 0.03);
+  const latV = natSeat.clone().sub(top).addScaledVector(up, -al.axial);
+  const depth = THREE.MathUtils.clamp((AD_CONTACT - al.axial) * 0.4, 0, AD_CONTACT);
+  const visAxial = al.axial > AD_CONTACT ? al.axial : AD_CONTACT - depth;
+  const seatW = top.clone().addScaledVector(up, visAxial).addScaledVector(latV, al.axial > AD_CONTACT ? 1 - kAlign : 0);
+  setWorldPose(A, seatW, natQ.clone().slerp(vq, al.axial > AD_CONTACT ? kAlign : 1));
+  if (kAlign > 0.9 && !ins.aligned) { ins.aligned = true; fx('align', top, [ha, hv]); }
+  if (kAlign < 0.6) ins.aligned = false;
+  ins.hapT -= 1 / 72;
+  if (depth > 0 && ins.hapT <= 0) { ins.hapT = 0.045; fx('press', top, [ha, hv], depth / AD_CONTACT); }
+  if (depth > AD_CONTACT * 0.5 && !ins.popped) { ins.popped = true; fx('pop', top, [ha, hv]); }   // spike fura o septo
+  P.hint = depth > 0 ? 'Pressione firme: o spike está furando o septo…' : 'Alinhado: desça o OncoSafe sobre o frasco.';
+  setGhost(depth === 0);
+  for (const b of [A.userData.body, P.vial.userData.body]) if (b) b.collisionResponse = false;
+  if (AD_CONTACT - depth <= 0.0006) { setGhost(false); lockAdapter(); }
+  return true;
+}
+function adapterInsertEnd(locked = false) {
+  const A = P.adapter;
+  if (A?.userData.natLocal && !locked && A.parent !== P.vial) { A.position.copy(A.userData.natLocal.p); A.quaternion.copy(A.userData.natLocal.q); }
+  if (A) A.userData.natLocal = null;
+  P.adIns = null;
+}
+// ---------- [REVISÃO] confirmação do assentamento: girar ~15° para cada lado, com atrito e catraca ----------
+const SEAT_ANG = THREE.MathUtils.degToRad(15), SEAT_MAX = THREE.MathUtils.degToRad(24), SEAT_CLICK = THREE.MathUtils.degToRad(5);
+function seatHint() {
+  const s = P.adSeat || {};
+  return `Confirme o encaixe: gire o OncoSafe nos 2 sentidos  ↻ ${s.cw ? '✓' : '…'}   ↺ ${s.ccw ? '✓' : '…'}` + (renderer.xr.isPresenting ? '' : '  (roda do mouse)');
+}
+function startSeatTwist(hand, other) {
+  const h = handWorld(hand), o = handWorld(other);
+  P.adTw = { hand, other, lastQ: h.q, lastQo: o.q, start: h.p };
+  gloveFlash[hand] = 1;
+}
+function seatAdd(dA, pos, hands) {
+  const s = P.adSeat; if (!s || P.adSeated) return;
+  s.angle = THREE.MathUtils.clamp(s.angle + dA * 0.75, -SEAT_MAX, SEAT_MAX);    // atrito: gira um pouco menos que o punho
+  const n = Math.floor(Math.abs(s.angle) / SEAT_CLICK);
+  if (n !== s.clicks) { s.clicks = n; fx('ratchet', pos, hands); }
+  if (s.angle <= -SEAT_ANG && !s.cw) { s.cw = true; fx('align', pos, hands); }
+  if (s.angle >= SEAT_ANG && !s.ccw) { s.ccw = true; fx('align', pos, hands); }
+  P.adapter.rotation.y = s.angle;
+  if (s.cw && s.ccw) {
+    P.adSeated = true; P.adTw = null; fx('seated', pos, hands);
+    const a0 = s.angle; addAnim(0.25, u => { P.adapter.rotation.y = a0 * (1 - u); });
+  }
+}
+function updateSeatTwist() {
+  const t = P.adTw; if (!t) return;
+  if (P.adSeated || P.vial.userData.heldBy !== t.other) { P.adTw = null; return; }
+  const h = handWorld(t.hand), o = handWorld(t.other), up = vialFrame().up;
+  if (h.p.distanceTo(t.start) > 0.12) { P.adTw = null; return; }
+  let dA = twistAbout(t.lastQ, h.q, up) - twistAbout(t.lastQo, o.q, up);
+  t.lastQ = h.q; t.lastQo = o.q;
+  seatAdd(dA, P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y + 0.02, 0)), [t.hand, t.other]);
+  P.hint = seatHint();
 }
 // "fantasma" verde mostrando onde o OncoSafe assenta no frasco
 let ghost = null;
@@ -2948,8 +3256,7 @@ function attachSad() {
   s.add(a); a.position.set(0, SYR_IN, 0); a.quaternion.identity();
   P.sadOn = true; P.twist = null; controls.enabled = true;
   rebuildBody(s, syrShapes());
-  SFX.trava(s.getWorldPosition(new THREE.Vector3()));
-  for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
+  fx('snap', s.getWorldPosition(new THREE.Vector3()));   // [REVISÃO]
   if (typeof sadHand === 'number') { held[sadHand] = null; }
 }
 // seringa (com adaptador) no OncoSafe: empurra até o clique
@@ -2961,7 +3268,7 @@ function connectToVial() {
   if (isOpen()) emitAerosol(luerWorld(), 0.6);         // perfuração do septo
   P.syrOn = 'vial'; P.twist = null; controls.enabled = true;
   if (!renderer.xr.isPresenting && P.vial.userData.heldBy === null) standVial('up');   // PC: conjunto preso no suporte
-  SFX.trava(luerWorld()); for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
+  fx('snap', luerWorld());                             // [REVISÃO] som + vibração sincronizados
 }
 function layDownSyringe(nearP) {                     // PC: a seringa solta fica deitada ao lado
   const s = P.syringe;
@@ -2991,7 +3298,7 @@ function connectToBag() {
   s.position.copy(bp.port).addScaledVector(bp.portAxis, -(isOpen() ? NEEDLE_IN : CON_IN) - tipLocalY());
   rebuildBody(P.bag, { ...shapeDef('bag'), shapes: [...SHAPES.bag.shapes, { type: 'cyl', r: 0.007, h: 0.1, pos: [bp.port.x + 0.05, bp.port.y, bp.port.z], axis: 'x' }] });
   P.syrOn = 'bag';
-  SFX.trava(portWorld().p); for (let i = 0; i < 2; i++) pulse(i, 0.9, 60);
+  fx('snap', portWorld().p);                           // [REVISÃO]
 }
 function detachFromBag(hand) {
   const s = P.syringe;
@@ -3046,11 +3353,19 @@ function startPlunger(hand, p) {
 }
 // ação do procedimento ao fechar a mão / apertar o gatilho (true = usou)
 function procGrab(i, p, mode) {                     // mode: 'grip' | 'pinch' (controle) ou indefinido (mãos rastreadas)
+  if (P.swabVis && mode !== 'grip' && !held[i] && P.swabVis.m.getWorldPosition(new THREE.Vector3()).distanceTo(p) < 0.045) {
+    const g = swabToItem(P.swabVis.m); holdItem(i, g); return true;              // [REVISÃO] lenço exposto: pinça para tirar
+  }
+  if (P.adapterOn && !P.adSeated && otherHandHolds(P.vial, i) &&                   // [REVISÃO] girar o OncoSafe encaixado
+      P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y + 0.015, 0)).distanceTo(p) < 0.07) { startSeatTwist(i, P.vial.userData.heldBy); return true; }
   if (mode !== 'grip' && tearStart(i, p)) return true;                  // rasgar o sachê segurado pela outra mão
   if (mode !== 'pinch' && padTwoStart(i, p)) return true;              // segunda mão no campo: abre entre as mãos
   if (mode !== 'pinch' && curStep() === 'descartar' && P.padSheet && padSheetNear(p) && nearestItem(p, 0.05, null, i) === null) { pickPadSheet(i); return true; }
   let zone = syringeZone(i, p);
-  if (zone && mode === 'pinch') zone = 'plunger';                       // gatilho: pinça o êmbolo
+  if (zone && mode === 'pinch') {                                      // gatilho + A/X: pinça firme no êmbolo
+    if (!firmPinch(i)) { setHint('Pinça firme: aperte o gatilho e encoste o polegar no A/X.', 2500); return false; }
+    zone = 'plunger';
+  }
   else if (zone && mode === 'grip') {                                   // grip: segura o corpo da seringa para girar/puxar
     if (P.syrOn === 'vial' && reached('desconectar')) zone = isOpen() ? 'pull' : 'twist';
     else if (P.syrOn === 'bag' && reached('bolsa_desc')) zone = 'pull';
@@ -3070,6 +3385,8 @@ function procGrab(i, p, mode) {                     // mode: 'grip' | 'pinch' (c
   return false;
 }
 function procRelease(i) {
+  if (P.adTw && P.adTw.hand === i) P.adTw = null;
+  if (P.adIns && P.adIns.hand === i) adapterInsertEnd();
   if (P.padTwo && (P.padTwo.a === i || P.padTwo.b === i)) endPadTwo(true);   // soltou com o campo aberto: apoia na bancada
   if (P.tear && P.tear.hand === i) { setTearVisual(P.tear.s, 0); P.tear = null; }
   if (P.plunger && P.plunger.hand === i) P.plunger = null;
@@ -3144,9 +3461,10 @@ function updateProcedure(dt) {
   // gaze ativa: a que está na mão; senão, a primeira disponível
   const inHand = P.gauzes.find(g => items.includes(g) && heldOrMouse(g));
   P.gauze = inHand || P.gauzes.find(gauzeUsable) || null;
-  updateTear();
+  updateTear(); updateSwab();
   runAnims(dt);                                        // [RASGO]/[CAMPO] animações
-  if (!P.gauze && ['limpar1', 'limpar2', 'septo'].includes(id) && !P.tear) P.hint = P.hint || (renderer.xr.isPresenting
+  updateSeatTwist();                                   // [REVISÃO] giro de confirmação do OncoSafe
+  if (!P.gauze && ['limpar1', 'limpar2', 'septo'].includes(id) && !P.tear && !P.swabVis) P.hint = P.hint || (renderer.xr.isPresenting
     ? 'Abra um AlcoolPrep: segure o pacote numa mão e rasgue na marca "Rasgue aqui" com a outra.'
     : 'Abra um AlcoolPrep: arraste o pacote para rasgá-lo.');
   if (inHand?.userData.fallen && ['limpar1', 'limpar2', 'septo'].includes(id)) P.hint = 'Este lenço caiu no chão: está contaminado. Descarte e abra outro.';
@@ -3171,8 +3489,12 @@ function updateProcedure(dt) {
 
   // OncoSafe no frasco (só a partir do passo de montagem)
   if (P.adapter && !P.adapterOn) {
-    const al = adapterAlignment();
     const ha = P.adapter.userData.heldBy, hv = P.vial.userData.heldBy;
+    let insHandled = false;
+    if (typeof ha === 'number' && typeof hv === 'number' && ha !== hv && reached('montagem')) insHandled = adapterInsertVR(ha, hv);
+    else adapterInsertEnd();
+    if (!insHandled && !P.adapterOn) {
+    const al = adapterAlignment();
     const heldAny = ha !== null || hv !== null;
     const near = al.cos > 0.9 && al.lateral < 0.014 && al.axial > -0.012 && al.axial < 0.035;
     for (const b of [P.adapter.userData.body, P.vial.userData.body]) if (b) b.collisionResponse = !(near && heldAny);
@@ -3180,12 +3502,13 @@ function updateProcedure(dt) {
     const twoHands = typeof ha === 'number' && typeof hv === 'number' && ha !== hv;
     const close = al.lateral < 0.10 && Math.abs(al.axial) < 0.12;
     if (close && !reached('montagem') && (typeof ha === 'number' || ha === 'mouse')) setHint(id === 'septo' ? 'Antes de encaixar, desinfete o septo com a gaze.' : 'Ainda não: siga o passo atual do painel.', 300);
-    else if (near && twoHands && al.axial < 0.003) { if (vm) vm.emissiveIntensity = 0; setGhost(false); lockAdapter(); }
+    else if (near && twoHands && al.axial < 0.003 && !P.adIns) { if (vm) vm.emissiveIntensity = 0; setGhost(false); lockAdapter(); }
     else {
       if (vm) { vm.emissive.setHex(0x22ff77); vm.emissiveIntensity = near && heldAny && reached('montagem') ? 0.6 : 0; }
       setGhost(close && reached('montagem') && (twoHands || ha === 'mouse'));
       if (close && reached('montagem') && !twoHands && typeof (typeof ha === 'number' ? ha : hv) === 'number') P.hint = 'Use as duas mãos: o frasco numa mão e o OncoSafe na outra.';
       else if (near && twoHands) P.hint = 'Pressione o OncoSafe para baixo até travar.';
+    }
     }
   }
 
@@ -3316,7 +3639,7 @@ function updateProcedure(dt) {
     }
     case 'materiais': ok = P.inside === (isOpen() ? 3 : 5); break;
     case 'septo': ok = P.septoT >= SEPTO_S; break;
-    case 'montagem': ok = P.adapterOn; break;
+    case 'montagem': ok = P.adapterOn && P.adSeated; if (P.adapterOn && !P.adSeated) P.hint = P.hint || seatHint(); break;   // [REVISÃO] só completa após girar nos 2 sentidos
     case 'sadapt': ok = P.sadOn; break;
     case 'ar_puxar': ok = !P.plunger && P.syr.air >= ALVO_ML - 0.3; break;
     case 'conectar': case 'perfurar': ok = P.syrOn === 'vial'; break;
@@ -3422,6 +3745,7 @@ function drawProcPanel() {
   g.fillStyle = '#cfe3f2'; g.font = '24px system-ui, sans-serif'; g.fillText(P.allDone ? (isOpen() ? 'Bolsa pronta · compare com o sistema fechado (botão na mesa).' : 'Bolsa pronta e embalada · capela limpa · zero aerossol.') : status, 32, H - 30, W - 60);
   panelTex.needsUpdate = true;
   countEl.textContent = P.allDone ? 'Procedimento concluído ✓' : `Passo ${k + 1}/${STEPS.length} · ${stepText(k, vr)}`;
+  drawMiniPanel(k + 1, STEPS.length, P.allDone ? 'Procedimento concluído' : stepText(k, vr), P.allDone ? '' : P.hint, P.allDone);   // [PAINEL] faixa compacta
   countEl.classList.toggle('done', P.allDone);
   zone.material.color.set(P.allDone ? 0x5ee08a : 0x4fd1ff);
 }
@@ -3527,6 +3851,9 @@ function procMouseDragMove(wanted) {
   else if (P.twist && P.twist.mode === 'sadapt' && P.twist.hand === 'mouse' && dist > 0.07) cancelTwist();
 }
 function procWheel(e) {
+  if (P.adapterOn && !P.adSeated && curStep() === 'montagem') {          // [REVISÃO] PC: girar o OncoSafe com a roda
+    e.preventDefault(); seatAdd(Math.sign(e.deltaY || 1) * THREE.MathUtils.degToRad(7), P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y + 0.02, 0)), []); return true;
+  }
   if (!P.twist || P.twist.hand !== 'mouse') return false;
   e.preventDefault();
   P.twist.angle += Math.sign(e.deltaY || 1) * THREE.MathUtils.degToRad(25);
@@ -3769,8 +4096,9 @@ function blockingGrillItem() {
   return null;
 }
 function gSache() {                                  // aponta um AlcoolPrep fechado e mostra o puxão do rasgo
+  if (P.swabVis) { gPoint(P.swabVis.m.getWorldPosition(new THREE.Vector3())); return; }   // [REVISÃO] lenço exposto: pince aqui
   const S = P.saches.find(o => heldBy(o)) || P.saches[0]; if (!S) return;
-  const notch = S.localToWorld(new THREE.Vector3(SACHE_W / 2, SACHE_T, tearZ)), out = new THREE.Vector3(1, 0, 0).applyQuaternion(frameOf(S).q);
+  const notch = tabWorld(S), out = new THREE.Vector3(0, 0, 1).applyQuaternion(frameOf(S).q);   // [REVISÃO] aponta a aba e o sentido do puxão
   if (renderer.xr.isPresenting && !isHeldNum(S)) { gPointItem(S); return; }
   gPoint(notch); gMove(notch.clone().addScaledVector(out, 0.01), out, 0.06);
 }
@@ -3813,6 +4141,11 @@ function guideStep() {
       break;
     }
     case 'montagem': {
+      if (P.adapterOn) {                                 // [REVISÃO] confirmar girando: seta curva alternando o sentido
+        const up = vialFrame().up, c = V.localToWorld(new THREE.Vector3(0, SEAT_Y + 0.03, 0));
+        gRot(c, up, false, P.adSeat?.cw && !P.adSeat?.ccw ? 1 : P.adSeat?.ccw && !P.adSeat?.cw ? -1 : (Math.floor(gt()) % 2 ? 1 : -1));
+        break;
+      }
       const top = V.localToWorld(new THREE.Vector3(0, SEAT_Y, 0)), ha = P.adapter.userData.heldBy, hv = V.userData.heldBy;
       if (vr) {
         if (typeof hv !== 'number') gPointItem(V);
@@ -3902,7 +4235,7 @@ spawnProcedure();
 
 buildStaticPhysics();
 
-window.game = { makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
