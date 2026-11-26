@@ -780,7 +780,6 @@ for (let i = 0; i < 2; i++) {
   });
   controller.addEventListener('selectstart', () => {
     if (isHand[i]) return; ctrlBtn[i].trig = true;
-    if (mrCal && sessionMR) { calibrateDesk(i); return; }   // [REALIDADE] calibração da mesa real
     if (!held[i] && sashHeldBy !== i && !grabMode[i]) grab(i, 'pinch');
     else if (held[i] && grabMode[i] === 'grip') triggerWhileHolding(i);
   });
@@ -1311,7 +1310,7 @@ function updateSeat() {
   let press = false;
   for (const src of renderer.xr.getSession()?.inputSources || [])
     if (src.handedness === 'left' && src.gamepad?.buttons[3]?.pressed) press = true;   // clique no analógico esquerdo
-  if (press && !recenterLatch) { if (sessionMR) { mrCal = true; mrHintT = 0; } else { recenterSeated(); setHint('Posição recentralizada (sentado).', 2000); } }
+  if (press && !recenterLatch) { recenterSeated(); setHint('Posição recentralizada (sentado).', 2000); }
   recenterLatch = press;
 }
 
@@ -1457,13 +1456,12 @@ const msg = document.getElementById('msg');
   async function startVR() {
     if (renderer.xr.isPresenting) { renderer.xr.getSession().end(); return; }
     try {
-      sessionMR = realityMode === 'mr';                // [REALIDADE] realidade mista = immersive-ar (passthrough)
-      const session = await navigator.xr.requestSession(sessionMR ? 'immersive-ar' : 'immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking', 'layers'] });
+      const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking', 'layers'] });
       await renderer.xr.setSession(session);
       overlay.classList.remove('show');
       unlockAudio();
       recenterFrames = 3;                              // [ERGONOMIA] posiciona o jogador sentado em frente à capela
-      applyRealityLook(sessionMR); mrCal = sessionMR; mrHintT = 0;
+      primeVoice(); narrStep = -1; lastSpoken = '';    // [VOZ] libera o áudio no toque e lê o passo atual no óculos
       qlInit(session);                                 // [PAINEL] camada nativa (se o Quest oferecer)
       if (tut.step >= 0 && tut.mode === 'pc') endTutorial();
       if (!tutSeen('vr')) startTutorial('vr');
@@ -1472,7 +1470,7 @@ const msg = document.getElementById('msg');
         vrBtn.textContent = 'Entrar em VR';
         for (let i = 0; i < 2; i++) release(i);
         rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);   // [ERGONOMIA] volta ao normal fora do VR
-        applyRealityLook(false); sessionMR = false; mrCal = false; switchPending = false; updateEnterTexts(); QL.ok = false;
+        QL.ok = false;
         overlay.classList.add('show');
       });
     } catch (e) { overlay.classList.remove('show'); msg.textContent = 'Não foi possível iniciar o VR: ' + e.message; }
@@ -2654,15 +2652,53 @@ function ttsVoice() {
   const want = LANG_TTS[LANG], vs = tts.getVoices();
   return vs.find(v => v.lang === want) || vs.find(v => v.lang?.startsWith(want.slice(0, 2))) || null;
 }
+// [VOZ] O navegador do Quest pode não ter vozes do sistema (speechSynthesis mudo). Por isso:
+//  1) usa speechSynthesis quando existe voz do idioma E ela realmente começa a falar;
+//  2) senão, toca a narração como áudio online (TTS do Google, em trechos curtos) num <audio> liberado no toque de entrar.
+let voiceMode = 'auto';                       // 'auto' → decide; 'tts' → voz do sistema ok; 'net' → áudio online
+const narrAudio = new Audio(); narrAudio.preload = 'auto'; narrAudio.volume = 0.95;
+let netQueue = [], netPlaying = false;
+const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+addEventListener('pointerdown', () => primeVoice(), { once: true });
+function primeVoice() {                        // chamado dentro do toque do usuário (entrar no VR / botões)
+  try { narrAudio.src = SILENT; narrAudio.play().catch(() => {}); } catch (e) {}
+  try { if (tts) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; tts.speak(u); } } catch (e) {}
+}
+function chunks(text, max = 180) {
+  const out = []; let cur = '';
+  for (const w of text.split(/(?<=[.,;:!?])\s+|\s+/)) {
+    if ((cur + ' ' + w).trim().length > max) { if (cur) out.push(cur.trim()); cur = w; } else cur = (cur + ' ' + w).trim();
+  }
+  if (cur) out.push(cur.trim()); return out;
+}
+function netNext() {
+  if (!netQueue.length) { netPlaying = false; return; }
+  netPlaying = true;
+  const q = netQueue.shift(), tl = { pt: 'pt-BR', en: 'en-US', es: 'es-ES' }[LANG] || 'pt-BR';
+  narrAudio.onended = netNext; narrAudio.onerror = () => { netPlaying = false; netQueue = []; };
+  narrAudio.src = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${tl}&q=${encodeURIComponent(q)}`;
+  narrAudio.play().catch(() => { netPlaying = false; netQueue = []; });
+}
+function speakNet(clean, interrupt) {
+  if (interrupt) { netQueue = []; try { narrAudio.pause(); } catch (e) {} netPlaying = false; }
+  netQueue.push(...chunks(clean)); if (!netPlaying) netNext();
+}
+function voiceBusy() { return (tts && tts.speaking) || netPlaying; }
+function stopVoice() { tts?.cancel(); netQueue = []; try { narrAudio.pause(); } catch (e) {} netPlaying = false; }
 function speak(text, interrupt = false) {
-  if (!voiceOn || !tts || !text) return;
-  const clean = text.replace(/[✓▶👉⚠↻↺…]/g, '').replace(/\s+/g, ' ').trim();
+  if (!voiceOn || !text) return;
+  const clean = text.replace(/[✓▶👉⚠↻↺…→←·]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!clean || clean === lastSpoken) return;
+  lastSpoken = clean; lastSpeakT = performance.now();
+  const v = ttsVoice();
+  if (voiceMode === 'net' || !tts || !v) { speakNet(clean, interrupt); return; }
   if (interrupt) tts.cancel();
   const u = new SpeechSynthesisUtterance(clean);
-  u.lang = LANG_TTS[LANG]; const v = ttsVoice(); if (v) u.voice = v;
-  u.rate = 1.03; u.volume = 0.9;
-  tts.speak(u); lastSpoken = clean; lastSpeakT = performance.now();
+  u.lang = LANG_TTS[LANG]; u.voice = v; u.rate = 1.03; u.volume = 0.95;
+  let started = false; u.onstart = () => { started = true; voiceMode = 'tts'; };
+  u.onerror = () => { if (!started) { voiceMode = 'net'; speakNet(clean, true); } };
+  tts.speak(u);
+  if (voiceMode === 'auto') setTimeout(() => { if (!started) { voiceMode = 'net'; tts.cancel(); speakNet(clean, true); } }, 1800);
 }
 // lê o passo ao mudar; dicas só quando ficam na tela por 1,5 s e no máximo a cada 6 s
 let narrStep = -1, hintSince = 0, hintSeen = '';
@@ -2677,7 +2713,7 @@ function updateNarration() {
   }
   const h = P.hint;
   if (h !== hintSeen) { hintSeen = h; hintSince = performance.now(); return; }
-  if (h && performance.now() - hintSince > 1500 && performance.now() - lastSpeakT > 6000 && !tts?.speaking) speak(T(h));
+  if (h && performance.now() - hintSince > 1500 && performance.now() - lastSpeakT > 6000 && !voiceBusy()) speak(T(h));
 }
 
 
@@ -4331,49 +4367,7 @@ function updateModeButton(dt) {
   modeBtn.position.y = 0.057 - 0.005 * Math.min(1, modePress * 3);
   modeMat.emissiveIntensity = modePress * 0.6;
 }
-// ===================== [REALIDADE] Botão de tipo de realidade: VR (laboratório virtual) ↔ realidade mista =====================
-// Realidade mista = sessão WebXR "immersive-ar" do Quest 3 (passthrough): a sala virtual some e a capela, a mesa de inox
-// e os materiais aparecem no seu ambiente real. Uma calibração rápida põe a bancada da capela sobre a sua mesa real.
-// Trocar o tipo de realidade exige reabrir a sessão (o navegador pede um toque): ao apertar o botão dentro do óculos,
-// a sessão atual fecha e aparece "Toque para entrar em realidade mista".
-let realityMode = 'vr', mrSupported = false, mrCal = false, switchPending = false, sessionMR = false, mrHintT = 0;
-const BG_VR = scene.background;
-try { navigator.xr?.isSessionSupported?.('immersive-ar').then(v => { mrSupported = !!v; drawExtraLabels(); }).catch(() => {}); } catch (e) {}
-function applyRealityLook(mr) {
-  environment.visible = !mr;
-  scene.background = mr ? null : BG_VR;
-  renderer.setClearColor(0xe8ecef, mr ? 0 : 1);
-  for (const sf of surfaces) if (sf.lab) sf.off = mr;          // bancadas da sala virtual não "seguram" a mão no modo misto
-}
-function pressReality() {
-  if (!mrSupported && realityMode === 'vr') { setHint('Realidade mista indisponível neste aparelho/navegador.', 3500); return; }
-  realityMode = realityMode === 'vr' ? 'mr' : 'vr';
-  drawExtraLabels(); updateEnterTexts();
-  if (renderer.xr.isPresenting) { switchPending = true; renderer.xr.getSession().end(); }
-}
-// calibração: controle apoiado na borda da mesa real → a borda da bancada da capela vai para esse ponto, na sua frente
-function calibrateDesk(i) {
-  const xrCam = renderer.xr.getCamera(); rig.updateMatrixWorld(true); xrCam.updateMatrixWorld(true);
-  const R = grips[i].position.clone();                       // ponto real (espaço de referência do Quest)
-  const f = new THREE.Vector3(0, 0, -1).applyQuaternion(xrCam.getWorldQuaternion(new THREE.Quaternion()));
-  rig.rotation.y = -(Math.atan2(-f.x, -f.z) - rig.rotation.y);
-  const W0 = new THREE.Vector3(SEAT.x, table.top, table.maxZ);
-  rig.position.copy(W0).sub(R.clone().applyAxisAngle(UP, rig.rotation.y));
-  mrCal = false; panelYaw = null;
-  fx('seated', W0, [i]); setHint('Mesa calibrada: a capela está sobre a sua mesa real.', 3500);
-}
-function updateMR(dt) {
-  if (!sessionMR || !mrCal) return;
-  mrHintT -= dt;
-  if (mrHintT <= 0) { mrHintT = 2; setHint('Realidade mista: apoie o controle direito na borda da sua mesa real, à sua frente, e aperte o gatilho.', 2600); }
-}
-function updateEnterTexts() {
-  const big = document.querySelector('#enterVR .big');
-  if (big) big.textContent = realityMode === 'mr' ? 'Toque para entrar em realidade mista' : 'Toque para entrar em VR';
-  if (typeof vrBtn !== 'undefined' && vrBtn && !renderer.xr.isPresenting && !vrBtn.disabled) vrBtn.textContent = realityMode === 'mr' ? 'Entrar em realidade mista' : 'Entrar em VR';
-}
-
-// ===================== [REALIDADE]/[IDIOMA] Botões extras na mesa de inox =====================
+// ===================== [IDIOMA] Botões extras na mesa de inox =====================
 const EXTRA_BTNS = [];
 function makeBenchButton({ pos, w = 0.05, d = 0.13, btns }) {
   const g = new THREE.Group(); g.position.copy(pos); scene.add(g);
@@ -4402,25 +4396,17 @@ function pressExtra(e) {
 function updateExtraButtons(dt) {
   for (const e of EXTRA_BTNS) { e.press = Math.max(0, e.press - dt * 2.5); e.btn.position.y = 0.057 - 0.005 * Math.min(1, e.press * 3); e.mat.emissiveIntensity = e.press * 0.6; }
 }
-const realBox = makeBenchButton({ pos: new THREE.Vector3(1.072, 0.75, 0.07), btns: [{ color: 0x6a4cff, fn: pressReality }] });
 const langBox = makeBenchButton({ pos: new THREE.Vector3(1.072, 0.75, 0.205), d: 0.11, btns: [
-  { color: 0xf2b705, z: -0.026, r: 0.016, fn: () => { LANG = { pt: 'en', en: 'es', es: 'pt' }[LANG]; try { localStorage.setItem('bmr_lang', LANG); } catch (e) {} drawExtraLabels(); drawModeLabel(); narrStep = -1; procPanelKey = ''; tut.lastKey = ''; } },
+  { color: 0xf2b705, z: -0.026, r: 0.016, fn: () => { LANG = { pt: 'en', en: 'es', es: 'pt' }[LANG]; try { localStorage.setItem('bmr_lang', LANG); } catch (e) {} drawExtraLabels(); drawModeLabel(); voiceMode = 'auto'; stopVoice(); narrStep = -1; procPanelKey = ''; tut.lastKey = ''; } },
   { color: 0x2e9d5a, z: 0.026, r: 0.016, fn: () => { voiceOn = !voiceOn; try { localStorage.setItem('bmr_voz', voiceOn ? '1' : '0'); } catch (e) {}
-      if (voiceOn && !tts) setHint('Voz indisponível neste navegador.', 3000); if (!voiceOn) tts?.cancel(); else { narrStep = -1; lastSpoken = ''; } drawExtraLabels(); } },
+      if (!voiceOn) stopVoice(); else { primeVoice(); narrStep = -1; lastSpoken = ''; } drawExtraLabels(); } },
 ] });
 function drawExtraLabels() {
-  { const c = realBox.ctx, W = 480, H = 160; c.fillStyle = '#2a2e33'; c.fillRect(0, 0, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
-    c.fillStyle = '#9aa3ab'; c.font = 'bold 32px system-ui, sans-serif'; c.fillText(LANG === 'en' ? 'REALITY' : LANG === 'es' ? 'REALIDAD' : 'REALIDADE', W / 2, 32);
-    c.fillStyle = realityMode === 'mr' ? '#b9a6ff' : '#7fd0ff'; c.font = 'bold 50px system-ui, sans-serif';
-    c.fillText(realityMode === 'mr' ? (LANG === 'en' ? 'MIXED' : LANG === 'es' ? 'MIXTA' : 'MISTA') : (LANG === 'en' ? 'VIRTUAL' : 'VIRTUAL'), W / 2, 96);
-    c.fillStyle = '#cfd6dc'; c.font = '24px system-ui, sans-serif';
-    c.fillText(mrSupported ? (realityMode === 'mr' ? 'passthrough · Quest 3' : 'laboratório completo') : 'mista indisponível aqui', W / 2, 140);
-    realBox.tex.needsUpdate = true; realBox.entries[0].mat.color.setHex(realityMode === 'mr' ? 0x8a6cff : 0x2f86d6); }
   { const c = langBox.ctx, W = 480, H = 160; c.fillStyle = '#2a2e33'; c.fillRect(0, 0, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
     c.fillStyle = '#9aa3ab'; c.font = 'bold 28px system-ui, sans-serif'; c.fillText('IDIOMA · LANGUAGE', W / 4 + 10, 30); c.fillText(LANG === 'en' ? 'VOICE' : 'VOZ', W * 3 / 4, 30);
     c.fillStyle = '#ffd34d'; c.font = 'bold 46px system-ui, sans-serif'; c.fillText(LANG.toUpperCase(), W / 4 + 10, 96);
     c.fillStyle = voiceOn ? '#5ee08a' : '#ff8a65'; c.fillText(voiceOn ? 'ON' : 'OFF', W * 3 / 4, 96);
-    c.fillStyle = '#cfd6dc'; c.font = '22px system-ui, sans-serif'; c.fillText(LANG_NAMES[LANG], W / 4 + 10, 140); c.fillText(tts ? '' : 'sem voz', W * 3 / 4, 140);
+    c.fillStyle = '#cfd6dc'; c.font = '22px system-ui, sans-serif'; c.fillText(LANG_NAMES[LANG], W / 4 + 10, 140); 
     langBox.tex.needsUpdate = true; langBox.entries[1].mat.color.setHex(voiceOn ? 0x2e9d5a : 0x8a3b1e); }
 }
 drawExtraLabels();
@@ -4674,7 +4660,7 @@ spawnProcedure();
 
 buildStaticPhysics();
 
-window.game = { applyRealityLook, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
@@ -4718,7 +4704,7 @@ renderer.setAnimationLoop(() => {
   stepPhysics(dt);
   updateProcedure(Math.min(raw, 0.25));                  // timers do procedimento em tempo real
   updateCapela(dt, time);
-  updateResetButton(dt); updateModeButton(dt); updateExtraButtons(dt); updateMR(dt);
+  updateResetButton(dt); updateModeButton(dt); updateExtraButtons(dt);
   updateTutorial(Math.min(raw, 0.5));   // tempo real (não desacelera se o quadro atrasar)
   renderer.render(scene, camera);
 });
