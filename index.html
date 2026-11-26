@@ -2699,7 +2699,7 @@ let padPreview = null;
 function padTwoStart(i, p) {
   const o = 1 - i, pad = P.pad;
   if (!pad || typeof i !== 'number' || held[o] !== pad || P.padSheet || P.padAnim || P.discarded.has(pad) || P.padTwo) return false;
-  if (_box.setFromObject(pad).distanceToPoint(p) > 0.09) return false;
+  if (_box.setFromObject(pad).distanceToPoint(p) > 0.12) return false;
   P.padTwo = { a: o, b: i, t: 0 };
   pad.visible = false;
   if (!padPreview) { padPreview = makeCloth(); scene.add(padPreview); }
@@ -3359,7 +3359,7 @@ function procGrab(i, p, mode) {                     // mode: 'grip' | 'pinch' (c
   if (P.adapterOn && !P.adSeated && otherHandHolds(P.vial, i) &&                   // [REVISÃO] girar o OncoSafe encaixado
       P.vial.localToWorld(new THREE.Vector3(0, SEAT_Y + 0.015, 0)).distanceTo(p) < 0.07) { startSeatTwist(i, P.vial.userData.heldBy); return true; }
   if (mode !== 'grip' && tearStart(i, p)) return true;                  // rasgar o sachê segurado pela outra mão
-  if (mode !== 'pinch' && padTwoStart(i, p)) return true;              // segunda mão no campo: abre entre as mãos
+  if (padTwoStart(i, p)) return true;                                  // segunda mão no campo (grip ou pinça na ponta): abre entre as mãos
   if (mode !== 'pinch' && curStep() === 'descartar' && P.padSheet && padSheetNear(p) && nearestItem(p, 0.05, null, i) === null) { pickPadSheet(i); return true; }
   let zone = syringeZone(i, p);
   if (zone && mode === 'pinch') {                                      // gatilho + A/X: pinça firme no êmbolo
@@ -3629,7 +3629,9 @@ function updateProcedure(dt) {
   switch (id) {
     case 'ligar': ok = capelaOn && P.purgeLeft <= 0; if (!capelaOn) P.hint = P.hint || 'Toque no botão verde ao lado do logo.'; break;
     case 'limpar1': ok = cleanFraction() >= COBERTURA; break;
-    case 'campo': ok = !!P.padSheet; break;
+    case 'campo': ok = !!P.padSheet;
+      if (!ok && !P.padTwo && !P.padAnim && isHeldNum(P.pad)) P.hint = P.hint || 'Pegue a outra ponta do campo com a outra mão e afaste as mãos para abrir (ou apoie-o dobrado na bancada).';
+      break;
     case 'vidro': {
       const s = sashStatus(), grills = grillsBlocked();
       if (s === 'alto') P.hint = 'Abaixe o vidro até a altura de trabalho.';
@@ -4117,7 +4119,16 @@ function guideStep() {
       break;
     }
     case 'campo':
-      if (P.pad && items.includes(P.pad)) { if (!heldBy(P.pad)) gPointItem(P.pad); else gRing(CAP_SPOT, YAXIS, 2.2); }
+      if (P.pad && items.includes(P.pad)) {
+        if (!heldBy(P.pad)) gPointItem(P.pad);
+        else {
+          gRing(CAP_SPOT, YAXIS, 2.2);
+          if (isHeldNum(P.pad) && !P.padTwo) {              // VR: mostra a ponta livre do campo para a outra mão pegar
+            const b = _box.setFromObject(P.pad), c = b.getCenter(new THREE.Vector3());
+            gPoint(new THREE.Vector3(c.x + 0.05, b.max.y, c.z));
+          }
+        }
+      }
       break;
     case 'vidro': {
       const s = sashStatus(), h = sashHandleWorld();
