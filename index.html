@@ -414,7 +414,7 @@ addCollider(-0.75, 0.0, -0.80, 0.75, 0.56, 0);       // embaixo da bancada (pés
 // Móveis do laboratório: tampos servem de apoio, corpos bloqueiam os itens
 const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
 for (const b of benchesLab) {
-  surfaces.push({ minX: b.x0, maxX: b.x1, minZ: LAB.minZ, maxZ: LAB.minZ + 0.67, top: BENCH_TOP });
+  surfaces.push({ minX: b.x0, maxX: b.x1, minZ: LAB.minZ, maxZ: LAB.minZ + 0.67, top: BENCH_TOP, lab: true });
   colliders.push(new THREE.Box3(V3(b.x0, 0, LAB.minZ), V3(b.x1, BENCH_TOP - 0.02, LAB.minZ + 0.67)));
   colliders.push(new THREE.Box3(V3(b.x0, 1.5, LAB.minZ), V3(b.x1, 2.2, LAB.minZ + 0.35)));
 }
@@ -780,6 +780,7 @@ for (let i = 0; i < 2; i++) {
   });
   controller.addEventListener('selectstart', () => {
     if (isHand[i]) return; ctrlBtn[i].trig = true;
+    if (mrCal && sessionMR) { calibrateDesk(i); return; }   // [REALIDADE] calibração da mesa real
     if (!held[i] && sashHeldBy !== i && !grabMode[i]) grab(i, 'pinch');
     else if (held[i] && grabMode[i] === 'grip') triggerWhileHolding(i);
   });
@@ -926,16 +927,17 @@ function grab(i, mode) {
     const itemD = item ? _box.setFromObject(item).distanceToPoint(_p) : Infinity;
     if (hd <= itemD) { grabSash(i, _p); return; }
   }
-  if (!item && powerBtn && _p.distanceTo(powerBtn.getWorldPosition(_btn)) < 0.06) { togglePower(); pulse(i, 0.7, 50); return; }
-  if (!item && resetBtn && _p.distanceTo(resetBtn.getWorldPosition(_btn)) < 0.07) { pressReset(); pulse(i, 0.7, 50); return; }
-  if (!item && modeBtn && _p.distanceTo(modeBtn.getWorldPosition(_btn)) < 0.07) { pressMode(); pulse(i, 0.7, 50); return; }
+  if (!item && powerBtn && _p.distanceTo(powerBtn.getWorldPosition(_btn)) < 0.06) { togglePower(); fx('button', null, [i]); return; }
+  if (!item && resetBtn && _p.distanceTo(resetBtn.getWorldPosition(_btn)) < 0.07) { pressReset(); fx('button', null, [i]); return; }
+  if (!item && modeBtn && _p.distanceTo(modeBtn.getWorldPosition(_btn)) < 0.07) { pressMode(); fx('button', null, [i]); return; }
+  if (!item) { const e = EXTRA_BTNS.find(e => _p.distanceTo(e.btn.getWorldPosition(_btn)) < 0.05); if (e) { pressExtra(e); fx('button', null, [i]); return; } }
   if (!item) { if (!isHand[i]) grabMode[i] = null; return; }
   holdItem(i, item);
 }
 function holdItem(i, item) {
   const a = anchorFor(i), u = item.userData;
   // [REVISÃO] TRAVA: um item na mão nunca passa direto para a outra mão; é preciso soltá-lo na bancada antes
-  if (typeof u.heldBy === 'number' && u.heldBy !== i) { pulse(i, 0.15, 15); return false; }
+  if (typeof u.heldBy === 'number' && u.heldBy !== i) { fx('deny', null, [i]); return false; }
   SFX.pegar(item.getWorldPosition(new THREE.Vector3())); tutEvent('grab');
   if (dragging === item) { dragging = null; controls.enabled = true; }
   a.attach(item);
@@ -957,7 +959,7 @@ function holdItem(i, item) {
   held[i] = item; history[i].length = 0;
   wakeAll();
   const m = u.mass || 0.02;                // [REVISÃO] "peso" na pega: vibração proporcional à massa
-  pulse(i, Math.min(0.9, 0.25 + m * 5), Math.min(90, 25 + m * 400));
+  fx('grab', null, [i], m);
   return true;
 }
 function updateAttachAnim(i, dt) {
@@ -1104,7 +1106,7 @@ const _pw = new THREE.Vector3(), hapT = [0, 0];
 function surfaceLift(w, r) {
   let lift = 0;
   for (const s of surfaces) {
-    if (s.top > 1.6) continue;
+    if (s.top > 1.6 || s.off) continue;
     if (w.x < s.minX || w.x > s.maxX || w.z < s.minZ || w.z > s.maxZ) continue;
     const bottom = w.y - r;
     if (bottom < s.top && bottom > s.top - 0.12) lift = Math.max(lift, s.top - bottom);
@@ -1144,8 +1146,39 @@ function updatePhysHand(i, left, dt) {
   lift = Math.min(lift, 0.15);
   if (lift > 0) { ph.position.y += lift; ph.updateMatrixWorld(true); }
   handPress[i] = lift;
+  const wall = capelaWalls(i, ph, sx);                // [REVISÃO] paredes, teto e vidro da capela também são sólidos
   hapT[i] -= dt;
-  if (lift > 0.002 && hapT[i] <= 0) { pulse(i, Math.min(0.55, 0.12 + lift * 12), 18); hapT[i] = 0.07; }
+  if ((lift > 0.002 || wall > 0.002) && hapT[i] <= 0) { fx(wall > lift ? 'wall' : 'press', null, [i], Math.min(1, (lift + wall) * 12)); hapT[i] = 0.07; }
+}
+// [REVISÃO] mão e peça na mão não atravessam as laterais, o fundo, o teto (filtro) e o vidro móvel da capela.
+// O vidro bloqueia a passagem acima da borda de baixo dele: por baixo (na abertura de trabalho) a mão entra normalmente.
+const CAP_IN = { x: 0.698, y0: 0.56, ceil: 1.276 };
+const lastSideIn = [false, false];
+function capelaWalls(i, ph, sx) {
+  const zg = CZ - 0.088, zb = table.minZ, sashBot = SASH_BASE + sashOffset;
+  const D = new THREE.Vector3();
+  const probes = [[ph.localToWorld(mir3(PALM_C, sx)), new THREE.Vector3(0.03, 0.03, 0.03)]];
+  const h = held[i];
+  if (h && h.parent && !(h === P.vial && P.syrOn)) { const b = _box.setFromObject(h); probes.push([b.getCenter(new THREE.Vector3()), b.getSize(new THREE.Vector3()).multiplyScalar(0.5)]); }
+  const inside0 = lastSideIn[i];
+  for (const [c, r] of probes) {
+    const inDepth = c.z < zg && c.z > zb - 0.15, inHeight = c.y > CAP_IN.y0 && c.y < 1.45;
+    if (inDepth && inHeight && Math.abs(c.x) < CAP_IN.x + 0.12) {
+      if (c.x - r.x < -CAP_IN.x) D.x = Math.max(D.x, -CAP_IN.x - (c.x - r.x));
+      if (c.x + r.x > CAP_IN.x) D.x = Math.min(D.x, CAP_IN.x - (c.x + r.x));
+      if (c.z - r.z < zb) D.z = Math.max(D.z, zb - (c.z - r.z));
+      if (c.y + r.y > CAP_IN.ceil && c.y < CAP_IN.ceil + 0.1) D.y = Math.min(D.y, CAP_IN.ceil - (c.y + r.y));
+    }
+    // vidro: não deixa atravessar o plano do vidro na parte acima da borda inferior dele
+    if (Math.abs(c.x) < CAP_IN.x + 0.02 && c.y + r.y > sashBot && c.y - r.y < 2.0) {
+      if (!inside0 && c.z - r.z < zg) D.z = Math.max(D.z, zg - (c.z - r.z));
+      else if (inside0 && c.z + r.z > zg) D.z = Math.min(D.z, zg - (c.z + r.z));
+    }
+  }
+  const m = D.length();
+  if (m > 0) { ph.position.add(D.applyQuaternion(rig.quaternion.clone().invert())); ph.updateMatrixWorld(true); }
+  lastSideIn[i] = ph.localToWorld(mir3(PALM_C, sx)).z < zg;
+  return m;
 }
 const mir3 = (v, sx) => V(v.x * sx, v.y, v.z);
 function updateControllerHand(i, src, left, dt) {
@@ -1178,7 +1211,7 @@ function updateControllerHand(i, src, left, dt) {
 
 function release(i) {
   procRelease(i);
-  if (sashHeldBy === i) { sashHeldBy = null; pulse(i, 0.2, 20); }
+  if (sashHeldBy === i) { sashHeldBy = null; fx('release', null, [i]); }
   const item = held[i]; if (!item) return;
   scene.attach(item);
   const u = item.userData; u.heldBy = null;
@@ -1204,7 +1237,7 @@ function release(i) {
   }
   held[i] = null;
   wakeAll();
-  pulse(i, 0.2, 20);
+  fx('release', null, [i]);
 }
 function pulse(i, strength, ms) {
   try { sources[i]?.gamepad?.hapticActuators?.[0]?.pulse?.(strength, ms); } catch (e) {}
@@ -1278,7 +1311,7 @@ function updateSeat() {
   let press = false;
   for (const src of renderer.xr.getSession()?.inputSources || [])
     if (src.handedness === 'left' && src.gamepad?.buttons[3]?.pressed) press = true;   // clique no analógico esquerdo
-  if (press && !recenterLatch) { recenterSeated(); setHint('Posição recentralizada (sentado).', 2000); }
+  if (press && !recenterLatch) { if (sessionMR) { mrCal = true; mrHintT = 0; } else { recenterSeated(); setHint('Posição recentralizada (sentado).', 2000); } }
   recenterLatch = press;
 }
 
@@ -1294,7 +1327,9 @@ const miniCanvas = document.createElement('canvas'); miniCanvas.width = 1024; mi
 const miniTex = new THREE.CanvasTexture(miniCanvas); miniTex.colorSpace = THREE.SRGBColorSpace;
 const panelMini = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.0703), new THREE.MeshBasicMaterial({ map: miniTex, transparent: true, toneMapped: false, depthTest: false, opacity: 0 }));
 panelMini.renderOrder = 31; panelMini.visible = false; scene.add(panelMini);
+let miniKey = '';
 function drawMiniPanel(stepNo, total, text, hint, done) {
+  miniKey = [stepNo, total, text, hint, done].join('|');
   const g = miniCanvas.getContext('2d'), W = 1024, H = 200;
   g.clearRect(0, 0, W, H);
   g.fillStyle = done ? 'rgba(30,138,76,0.94)' : 'rgba(16,22,30,0.92)'; g.beginPath(); g.roundRect(4, 4, W - 8, H - 8, 30); g.fill();
@@ -1336,6 +1371,74 @@ function updatePanelFollow(dt) {
   panelMini.position.copy(panel.position); panelMini.quaternion.copy(panel.quaternion);
 }
 
+// ===================== [PAINEL] Camada nativa do Quest (WebXR Layers · XRQuadLayer) =====================
+// Com o recurso "layers", o painel e a faixa compacta são entregues ao compositor do Quest como camadas planas:
+// o texto é amostrado uma única vez na resolução do display (sem passar pela reprojeção da cena) → bem mais nítido.
+// O conteúdo é desenhado na camada com um quadrilátero WebGL (mesma convenção de orientação do three.js).
+// Se o navegador não oferecer camadas, continua valendo o painel 3D normal (fallback automático).
+const QL = { ok: false };
+function qlInit(session) {
+  QL.ok = false;
+  try {
+    const binding = renderer.xr.getBinding?.();
+    const proj = session.renderState?.layers?.[0];
+    if (!binding?.createQuadLayer || !proj) return;
+    const space = renderer.xr.getReferenceSpace();
+    const mk = (w, h, pw, ph) => { const l = binding.createQuadLayer({ space, viewPixelWidth: pw, viewPixelHeight: ph, width: w, height: h, layout: 'mono' }); l.blendTextureSourceAlpha = true; return l; };
+    QL.full = mk(0.66 * PANEL_SCALE, 0.387 * PANEL_SCALE, panelCanvas.width, panelCanvas.height);
+    QL.mini = mk(0.36, 0.0703, miniCanvas.width, miniCanvas.height);
+    const gl = renderer.getContext();
+    const sh = (type, src) => { const o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o); return o; };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, 'attribute vec2 p; varying vec2 v; void main(){ v = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }'));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, 'precision mediump float; varying vec2 v; uniform sampler2D t; void main(){ vec4 c = texture2D(t, v); gl_FragColor = vec4(c.rgb * c.a, c.a); }'));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    Object.assign(QL, { binding, proj, session, gl, prog, buf, loc: gl.getAttribLocation(prog, 'p'), tex: gl.createTexture(), fb: gl.createFramebuffer(),
+      cur: null, keys: { full: '', mini: '' }, ok: true });
+    renderer.resetState();
+  } catch (e) { QL.ok = false; }
+}
+function qlDraw(layer, canvas) {
+  const { gl, binding } = QL, frame = renderer.xr.getFrame(); if (!frame) return;
+  const sub = binding.getSubImage(layer, frame), vp = sub.viewport;
+  gl.bindTexture(gl.TEXTURE_2D, QL.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, QL.fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sub.colorTexture, 0);
+  gl.viewport(vp.x, vp.y, vp.width, vp.height);
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE); gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(QL.prog); gl.bindBuffer(gl.ARRAY_BUFFER, QL.buf);
+  gl.enableVertexAttribArray(QL.loc); gl.vertexAttribPointer(QL.loc, 2, gl.FLOAT, false, 0, 0);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, QL.tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+const _qlq = new THREE.Quaternion(), _qlp = new THREE.Vector3();
+function qlUpdate() {
+  if (!QL.ok || !renderer.xr.isPresenting || QL.session !== renderer.xr.getSession()) return false;
+  try {
+    const want = panelCompact > 0.5 ? 'mini' : 'full';
+    if (want !== QL.cur) { QL.cur = want; QL.session.updateRenderState({ layers: [QL.proj, QL[want]] }); QL.keys[want] = ''; }
+    const layer = QL[want], src = want === 'full' ? panelCanvas : miniCanvas, mesh = want === 'full' ? panel : panelMini;
+    rig.updateMatrixWorld(true);
+    _qlp.copy(mesh.position); rig.worldToLocal(_qlp);
+    _qlq.copy(rig.quaternion).invert().multiply(mesh.quaternion);
+    layer.transform = new XRRigidTransform({ x: _qlp.x, y: _qlp.y, z: _qlp.z }, { x: _qlq.x, y: _qlq.y, z: _qlq.z, w: _qlq.w });
+    const key = want === 'full' ? procPanelKey : miniKey;
+    if (layer.needsRedraw || QL.keys[want] !== key) { qlDraw(layer, src); QL.keys[want] = key; renderer.resetState(); }
+    panel.visible = false; panelMini.visible = false;          // o compositor mostra a camada; a malha 3D fica oculta
+    return true;
+  } catch (e) { QL.ok = false; renderer.resetState(); return false; }
+}
+
 // Botão de entrar no VR
 const vrBtn = document.getElementById('vrBtn');
 const msg = document.getElementById('msg');
@@ -1354,11 +1457,14 @@ const msg = document.getElementById('msg');
   async function startVR() {
     if (renderer.xr.isPresenting) { renderer.xr.getSession().end(); return; }
     try {
-      const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking'] });
+      sessionMR = realityMode === 'mr';                // [REALIDADE] realidade mista = immersive-ar (passthrough)
+      const session = await navigator.xr.requestSession(sessionMR ? 'immersive-ar' : 'immersive-vr', { optionalFeatures: ['local-floor', 'hand-tracking', 'layers'] });
       await renderer.xr.setSession(session);
       overlay.classList.remove('show');
       unlockAudio();
       recenterFrames = 3;                              // [ERGONOMIA] posiciona o jogador sentado em frente à capela
+      applyRealityLook(sessionMR); mrCal = sessionMR; mrHintT = 0;
+      qlInit(session);                                 // [PAINEL] camada nativa (se o Quest oferecer)
       if (tut.step >= 0 && tut.mode === 'pc') endTutorial();
       if (!tutSeen('vr')) startTutorial('vr');
       vrBtn.textContent = 'Sair do VR';
@@ -1366,6 +1472,7 @@ const msg = document.getElementById('msg');
         vrBtn.textContent = 'Entrar em VR';
         for (let i = 0; i < 2; i++) release(i);
         rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);   // [ERGONOMIA] volta ao normal fora do VR
+        applyRealityLook(false); sessionMR = false; mrCal = false; switchPending = false; updateEnterTexts(); QL.ok = false;
         overlay.classList.add('show');
       });
     } catch (e) { overlay.classList.remove('show'); msg.textContent = 'Não foi possível iniciar o VR: ' + e.message; }
@@ -1890,8 +1997,13 @@ function dressSash(parts) {
   // vidro: borda com a cor da espessura e reflexos diagonais suaves
   const gw = gBox.max.x - gBox.min.x, gh = gBox.max.y - gBox.min.y, gz = (gBox.min.z + gBox.max.z) / 2, gy = (gBox.min.y + gBox.max.y) / 2;
   const edge = new THREE.MeshBasicMaterial({ color: 0x9fd4dc, transparent: true, opacity: 0.55, depthWrite: false });
-  add(new THREE.BoxGeometry(gw, 0.004, 0.008), edge, 0, gBox.max.y - 0.002, gz, 2);
-  for (const x of [gBox.min.x + 0.002, gBox.max.x - 0.002]) add(new THREE.BoxGeometry(0.004, gh, 0.008), edge, x, gy, gz, 2);
+  // [VIDRO] extensão do vidro para cima, escondida atrás da faixa/painel frontal: ao fechar a capela por completo
+  // (vidro descendo até 40 cm) a extensão desce junto e o topo não fica aberto. Cabe sob o teto mesmo com o vidro no alto.
+  const EXT = Math.min(-SASH_MIN - 0.01, 2.085 - SASH_MAX - gBox.max.y);
+  const ext = add(new THREE.PlaneGeometry(gw, EXT), glassMat, 0, gBox.max.y + EXT / 2, gz, 2);
+  ext.raycast = () => {};                            // não interfere no clique/pega da alça
+  add(new THREE.BoxGeometry(gw, 0.004, 0.008), edge, 0, gBox.max.y + EXT - 0.002, gz, 2);
+  for (const x of [gBox.min.x + 0.002, gBox.max.x - 0.002]) add(new THREE.BoxGeometry(0.004, gh + EXT, 0.008), edge, x, gy + EXT / 2, gz, 2);
   const c = document.createElement('canvas'); c.width = 1024; c.height = 512; const g = c.getContext('2d');
   const band = (x0, wd, a) => {
     const gr = g.createLinearGradient(x0, 0, x0 + wd, 0);
@@ -2061,7 +2173,7 @@ function handleDistance(worldPoint) {
 function grabSash(i, worldPoint) {
   capelaRef.worldToLocal(_lp.copy(worldPoint));
   sashHeldBy = i; sashGrabY = _lp.y; sashGrabOffset = sashOffset;
-  pulse(i, 0.4, 30);
+  fx('engage', null, [i]);
 }
 function lowestSashLimit() {
   // o vidro não desce através de um instrumento parado na frente
@@ -2077,7 +2189,7 @@ function lowestSashLimit() {
 
 // dedo indicador (para apertar o botão)
 const _tip = new THREE.Vector3(), _btn = new THREE.Vector3();
-const pokeInside = [[false, false], [false, false], [false, false]]; let pokeCooldown = 0;
+const pokeInside = [[false, false], [false, false], [false, false], [false, false], [false, false], [false, false]]; let pokeCooldown = 0;
 function fingertipWorld(i, out) {
   if (!sources[i]) return null;
   if (isHand[i]) { const j = hands[i].joints['index-finger-tip']; return j ? j.getWorldPosition(out) : null; }
@@ -2092,12 +2204,12 @@ function updateCapela(dt, time) {
   pokeCooldown -= dt;
   if (renderer.xr.isPresenting) {
     // botões que se apertam com a ponta do dedo: liga/desliga da capela e reiniciar da mesa
-    for (const [b, fn, k] of [[powerBtn, togglePower, 0], [resetBtn, pressReset, 1], [modeBtn, pressMode, 2]]) {
+    for (const [b, fn, k] of [[powerBtn, togglePower, 0], [resetBtn, pressReset, 1], [modeBtn, pressMode, 2], ...EXTRA_BTNS.map((e, j) => [e.btn, () => pressExtra(e), 3 + j])]) {
       b.getWorldPosition(_btn);
       for (let i = 0; i < 2; i++) {
         const tip = fingertipWorld(i, _tip);
         const inside = !!tip && tip.distanceTo(_btn) < 0.03;
-        if (inside && !pokeInside[k][i] && pokeCooldown <= 0) { fn(); pulse(i, 0.7, 50); pokeCooldown = 0.6; }
+        if (inside && !pokeInside[k][i] && pokeCooldown <= 0) { fn(); fx('button', null, [i]); pokeCooldown = 0.6; }
         pokeInside[k][i] = inside;
       }
     }
@@ -2184,7 +2296,7 @@ function tutEvent(name) {
 function tutText_() {
   const s = TUT[tut.step];
   const handMode = tut.mode === 'vr' && isHand.some((h, i) => h && sources[i]);
-  return s.all || (tut.mode === 'pc' ? s.pc : (handMode && s.hand) || s.vr);
+  return T(s.all || (tut.mode === 'pc' ? s.pc : (handMode && s.hand) || s.vr));   // [IDIOMA]
 }
 function ensureTutPanel() {
   if (tut.panel) return;
@@ -2257,8 +2369,9 @@ function mouseSashPoint(e) {
 renderer.domElement.addEventListener('pointerdown', e => {
   if (renderer.xr.isPresenting || e.button !== 0 || dragging || !capelaRef) return;
   setNdc(e);
-  const hit = raycaster.intersectObjects([powerBtn, resetBtn, modeBtn, sash], true)[0];
+  const hit = raycaster.intersectObjects([powerBtn, resetBtn, modeBtn, ...EXTRA_BTNS.map(e => e.btn), sash], true)[0];
   if (!hit) return;
+  { const e = EXTRA_BTNS.find(e => e.btn === hit.object); if (e) { pressExtra(e); return; } }
   if (hit.object === powerBtn) { togglePower(); return; }
   if (hit.object === resetBtn) { pressReset(); return; }
   if (hit.object === modeBtn) { pressMode(); return; }
@@ -2272,8 +2385,8 @@ renderer.domElement.addEventListener('pointermove', e => {
   if (renderer.xr.isPresenting || dragging || !capelaRef) return;
   setNdc(e);
   if (raycaster.intersectObjects(items, true)[0]) return;
-  const hit = raycaster.intersectObjects([powerBtn, resetBtn, modeBtn, sash], true)[0];
-  if (hit) renderer.domElement.style.cursor = (hit.object === powerBtn || hit.object === resetBtn || hit.object === modeBtn) ? 'pointer' : 'ns-resize';
+  const hit = raycaster.intersectObjects([powerBtn, resetBtn, modeBtn, ...EXTRA_BTNS.map(e => e.btn), sash], true)[0];
+  if (hit) renderer.domElement.style.cursor = (hit.object === powerBtn || hit.object === resetBtn || hit.object === modeBtn || EXTRA_BTNS.some(e => e.btn === hit.object)) ? 'pointer' : 'ns-resize';
 });
 renderer.domElement.addEventListener('pointerup', () => {
   if (sashHeldBy === 'mouse') { sashHeldBy = null; mouseSashY = null; controls.enabled = true; }
@@ -2281,7 +2394,7 @@ renderer.domElement.addEventListener('pointerup', () => {
 
 // ---------- Botão "Reiniciar" na mesa de inox ----------
 // Fica em cima da mesa, na borda do fundo (oposta ao jogador), atrás dos instrumentos
-const RESET_POS = new THREE.Vector3(1.072, 0.75, -0.05);   // [ERGONOMIA]
+const RESET_POS = new THREE.Vector3(1.072, 0.75, -0.13);   // [ERGONOMIA]
 let resetBtn = null, resetMat = null, resetPress = 0;
 (function setupResetButton() {
   const g = new THREE.Group(); g.position.copy(RESET_POS); scene.add(g);
@@ -2340,6 +2453,15 @@ const FX = {
   snap:    { snd: (o, t) => { noiseHit(o, t, 3800, 6, 0.012, 0.35); tone(o, t, 2100, 0.03, 0.12, 'square'); tone(o, t, 900, 0.05, 0.08, 'triangle', 0.01); }, hap: [1.0, 70] },
   ratchet: { snd: (o, t) => { noiseHit(o, t, 5200, 8, 0.008, 0.16); tone(o, t, 2600, 0.012, 0.05, 'square'); }, hap: [0.35, 14] },
   seated:  { snd: (o, t) => { tone(o, t, 880, 0.09, 0.08, 'sine'); tone(o, t, 1320, 0.12, 0.08, 'sine', 0.08); }, hap: [0.7, 90] },
+  wall:    { snd: () => {}, hap: k => [0.2 + 0.5 * k, 18] },
+  button:  { snd: () => {}, hap: [0.7, 50] },                                   // botões físicos (capela, mesa)
+  deny:    { snd: () => {}, hap: [0.15, 15] },                                  // ação recusada (ex.: tentar roubar da outra mão)
+  grab:    { snd: () => {}, hap: k => [Math.min(0.9, 0.25 + k * 5), Math.min(90, 25 + k * 400)] },   // k = massa (kg)
+  release: { snd: () => {}, hap: [0.2, 20] },
+  engage:  { snd: () => {}, hap: [0.5, 30] },                                   // começou a pinçar o êmbolo / girar / abrir o campo
+  place:   { snd: () => {}, hap: [0.6, 50] },
+  scrub:   { snd: (o, t, k) => noiseHit(o, t, 2600, 0.9, 0.05, Math.min(0.12, 0.03 + k * 0.06)), hap: k => [Math.min(0.5, 0.15 + k * 0.4), 25] },
+  click:   { snd: (o, t) => { noiseHit(o, t, 5200, 8, 0.008, 0.16); }, hap: [0.3, 15] },
 };
 function fx(name, pos, hands = [0, 1], k = 1) {
   const e = FX[name]; if (!e) return;
@@ -2347,6 +2469,217 @@ function fx(name, pos, hands = [0, 1], k = 1) {
   const h = typeof e.hap === 'function' ? e.hap(k) : e.hap;
   for (const i of hands) if (typeof i === 'number') pulse(i, Math.min(1, h[0]), h[1]);
 }
+
+
+// ===================== [IDIOMA] Português / English / Español + narração em voz =====================
+let LANG = 'pt', voiceOn = true;
+try { LANG = localStorage.getItem('bmr_lang') || 'pt'; voiceOn = localStorage.getItem('bmr_voz') !== '0'; } catch (e) {}
+const LANG_NAMES = { pt: 'PORTUGUÊS', en: 'ENGLISH', es: 'ESPAÑOL' };
+const LANG_TTS = { pt: 'pt-BR', en: 'en-US', es: 'es-ES' };
+// texto em português → [inglês, espanhol]
+const I18N = {
+  // fases
+  'Preparação da cabine': ['Cabinet preparation', 'Preparación de la cabina'],
+  'Materiais': ['Materials', 'Materiales'],
+  'Montagem e conexão': ['Assembly and connection', 'Montaje y conexión'],
+  'Aspiração': ['Aspiration', 'Aspiración'],
+  'Transferência': ['Transfer', 'Transferencia'],
+  'Finalização': ['Wrap-up', 'Finalización'],
+  'Perfuração': ['Piercing', 'Perforación'],
+  // passos
+  'Ligue a capela (botão verde) e aguarde a purga': ['Turn on the hood (green button) and wait for the purge', 'Encienda la cabina (botón verde) y espere la purga'],
+  'Abra um AlcoolPrep e limpe a bancada com o lenço (álcool 70%)': ['Open an AlcoolPrep and wipe the work surface with the pad (70% alcohol)', 'Abra un AlcoolPrep y limpie la mesa de trabajo con la toallita (alcohol 70%)'],
+  'Arraste um AlcoolPrep para rasgar e passe o lenço em toda a bancada': ['Drag an AlcoolPrep to tear it and wipe the whole surface', 'Arrastre un AlcoolPrep para rasgarlo y pase la toallita por toda la mesa'],
+  'Forre a bancada com o campo absorvente': ['Line the work surface with the absorbent pad', 'Cubra la mesa con el campo absorbente'],
+  'Arraste o campo absorvente para a bancada': ['Drag the absorbent pad onto the surface', 'Arrastre el campo absorbente a la mesa'],
+  'Confira: vidro na altura de trabalho e grelhas livres': ['Check: sash at working height and grilles clear', 'Verifique: vidrio a la altura de trabajo y rejillas libres'],
+  'Leve frasco, OncoSafe, adaptador de seringa, seringa e bolsa para a capela': ['Bring vial, OncoSafe, syringe adapter, syringe and bag into the hood', 'Lleve vial, OncoSafe, adaptador de jeringa, jeringa y bolsa a la cabina'],
+  'Desinfete o septo do frasco: esfregue o lenço AlcoolPrep no topo': ['Disinfect the vial septum: rub the AlcoolPrep pad on top', 'Desinfecte el septo del vial: frote la toallita AlcoolPrep en la parte superior'],
+  'Arraste o lenço até o topo do frasco e segure': ['Drag the pad to the top of the vial and hold', 'Arrastre la toallita hasta la parte superior del vial y mantenga'],
+  'Frasco numa mão, OncoSafe na outra: pressione até travar': ['Vial in one hand, OncoSafe in the other: press until it locks', 'Vial en una mano, OncoSafe en la otra: presione hasta trabar'],
+  'Solte o OncoSafe em cima do frasco': ['Drop the OncoSafe onto the vial', 'Suelte el OncoSafe sobre el vial'],
+  'Adaptador numa mão, seringa na outra: encaixe e gire ¼': ['Adapter in one hand, syringe in the other: fit and turn ¼', 'Adaptador en una mano, jeringa en la otra: encaje y gire ¼'],
+  'Leve a seringa ao adaptador de seringa e gire com a roda': ['Bring the syringe to the syringe adapter and turn with the wheel', 'Lleve la jeringa al adaptador y gire con la rueda'],
+  'Puxe 5,0 mL de ar na seringa': ['Draw 5.0 mL of air into the syringe', 'Aspire 5,0 mL de aire en la jeringa'],
+  'Arraste o êmbolo para puxar 5,0 mL de ar': ['Drag the plunger to draw 5.0 mL of air', 'Arrastre el émbolo para aspirar 5,0 mL de aire'],
+  'Encaixe a seringa no conector do OncoSafe e pressione até o clique': ['Fit the syringe onto the OncoSafe connector and press until it clicks', 'Encaje la jeringa en el conector del OncoSafe y presione hasta el clic'],
+  'Solte a seringa em cima do conector do OncoSafe': ['Drop the syringe onto the OncoSafe connector', 'Suelte la jeringa sobre el conector del OncoSafe'],
+  'Injete o ar no frasco: empurre o êmbolo (o balão enche)': ['Inject the air into the vial: push the plunger (the balloon fills)', 'Inyecte el aire en el vial: empuje el émbolo (el globo se llena)'],
+  'Arraste o êmbolo para baixo: injete o ar (o balão enche)': ['Drag the plunger down: inject the air (the balloon fills)', 'Arrastre el émbolo hacia abajo: inyecte el aire (el globo se llena)'],
+  'Inverta o conjunto: frasco por cima': ['Invert the assembly: vial on top', 'Invierta el conjunto: vial arriba'],
+  'Inverta o conjunto: botão "Inverter conjunto" ou tecla I': ['Invert the assembly: "Inverter conjunto" button or I key', 'Invierta el conjunto: botón "Inverter conjunto" o tecla I'],
+  'Puxe o êmbolo até 5,0 mL (o balão murcha)': ['Pull the plunger to 5.0 mL (the balloon deflates)', 'Tire del émbolo hasta 5,0 mL (el globo se desinfla)'],
+  'Arraste o êmbolo até 5,0 mL (o balão murcha)': ['Drag the plunger to 5.0 mL (the balloon deflates)', 'Arrastre el émbolo hasta 5,0 mL (el globo se desinfla)'],
+  'Elimine as bolhas e confira 5,0 mL na graduação': ['Remove the bubbles and check 5.0 mL on the scale', 'Elimine las burbujas y verifique 5,0 mL en la escala'],
+  'Desconecte a seringa do OncoSafe: gire ¼': ['Disconnect the syringe from the OncoSafe: turn ¼', 'Desconecte la jeringa del OncoSafe: gire ¼'],
+  'Clique na seringa e gire com a roda para soltar': ['Click the syringe and turn the wheel to release', 'Haga clic en la jeringa y gire la rueda para soltarla'],
+  'Conecte a seringa ao adaptador da bolsa (pressione até o clique)': ['Connect the syringe to the bag adapter (press until it clicks)', 'Conecte la jeringa al adaptador de la bolsa (presione hasta el clic)'],
+  'Solte a seringa no adaptador da bolsa': ['Drop the syringe onto the bag adapter', 'Suelte la jeringa en el adaptador de la bolsa'],
+  'Injete os 5,0 mL na bolsa': ['Inject the 5.0 mL into the bag', 'Inyecte los 5,0 mL en la bolsa'],
+  'Arraste o êmbolo até 0 mL': ['Drag the plunger to 0 mL', 'Arrastre el émbolo hasta 0 mL'],
+  'Desconecte a seringa da bolsa (puxe)': ['Disconnect the syringe from the bag (pull)', 'Desconecte la jeringa de la bolsa (tire)'],
+  'Clique na seringa para soltar da bolsa': ['Click the syringe to release it from the bag', 'Haga clic en la jeringa para soltarla de la bolsa'],
+  'Cole a etiqueta na bolsa': ['Stick the label on the bag', 'Pegue la etiqueta en la bolsa'],
+  'Coloque a bolsa na bandeja de saída': ['Place the bag in the output tray', 'Coloque la bolsa en la bandeja de salida'],
+  'Descarte frasco+OncoSafe, seringa e campo sem desmontar': ['Discard vial+OncoSafe, syringe and pad without disassembling', 'Deseche vial+OncoSafe, jeringa y campo sin desmontar'],
+  'Limpe a bancada com um lenço AlcoolPrep (álcool 70%)': ['Wipe the surface with an AlcoolPrep pad (70% alcohol)', 'Limpie la mesa con una toallita AlcoolPrep (alcohol 70%)'],
+  'Arraste um lenço sobre toda a bancada': ['Drag a pad over the whole surface', 'Arrastre una toallita por toda la mesa'],
+  'Mantenha a capela ligada (30 min reais, 5 s simbólicos)': ['Keep the hood on (30 min real, 5 s symbolic)', 'Mantenga la cabina encendida (30 min reales, 5 s simbólicos)'],
+  'Leve frasco, seringa com agulha e bolsa para a capela': ['Bring vial, syringe with needle and bag into the hood', 'Lleve vial, jeringa con aguja y bolsa a la cabina'],
+  'Segure o frasco e perfure o septo com a agulha': ['Hold the vial and pierce the septum with the needle', 'Sujete el vial y perfore el septo con la aguja'],
+  'Solte a seringa em cima do frasco (a agulha perfura o septo)': ['Drop the syringe onto the vial (the needle pierces the septum)', 'Suelte la jeringa sobre el vial (la aguja perfora el septo)'],
+  'Injete o ar no frasco: a pressão interna sobe': ['Inject the air into the vial: internal pressure rises', 'Inyecte el aire en el vial: la presión interna sube'],
+  'Arraste o êmbolo para baixo: injete o ar (a pressão sobe)': ['Drag the plunger down: inject the air (pressure rises)', 'Arrastre el émbolo hacia abajo: inyecte el aire (la presión sube)'],
+  'Puxe o êmbolo até 5,0 mL': ['Pull the plunger to 5.0 mL', 'Tire del émbolo hasta 5,0 mL'],
+  'Arraste o êmbolo até 5,0 mL': ['Drag the plunger to 5.0 mL', 'Arrastre el émbolo hasta 5,0 mL'],
+  'Retire a agulha do frasco (puxe a seringa)': ['Withdraw the needle from the vial (pull the syringe)', 'Retire la aguja del vial (tire de la jeringa)'],
+  'Clique na seringa para retirar a agulha do frasco': ['Click the syringe to withdraw the needle from the vial', 'Haga clic en la jeringa para retirar la aguja del vial'],
+  'Perfure a porta da bolsa com a agulha': ['Pierce the bag port with the needle', 'Perfore el puerto de la bolsa con la aguja'],
+  'Solte a seringa na porta da bolsa': ['Drop the syringe onto the bag port', 'Suelte la jeringa en el puerto de la bolsa'],
+  'Retire a agulha da bolsa (puxe)': ['Withdraw the needle from the bag (pull)', 'Retire la aguja de la bolsa (tire)'],
+  'Clique na seringa para retirar a agulha da bolsa': ['Click the syringe to withdraw the needle from the bag', 'Haga clic en la jeringa para retirar la aguja de la bolsa'],
+  'Descarte frasco, seringa com agulha e campo no coletor': ['Discard vial, syringe with needle and pad in the bin', 'Deseche vial, jeringa con aguja y campo en el contenedor'],
+  'Descontamine a bancada com um lenço AlcoolPrep (álcool 70%)': ['Decontaminate the surface with an AlcoolPrep pad (70% alcohol)', 'Descontamine la mesa con una toallita AlcoolPrep (alcohol 70%)'],
+  'Arraste um lenço sobre toda a bancada (e as manchas)': ['Drag a pad over the whole surface (and the stains)', 'Arrastre una toallita por toda la mesa (y las manchas)'],
+  // tutorial
+  'Bem-vindo ao laboratório\nBMR Medical!\nTutorial rápido de 30 segundos.': ['Welcome to the\nBMR Medical lab!\nQuick 30-second tutorial.', '¡Bienvenido al laboratorio\nBMR Medical!\nTutorial rápido de 30 segundos.'],
+  'Analógico esquerdo: andar\nAnalógico direito: girar': ['Left stick: move\nRight stick: turn', 'Stick izquierdo: caminar\nStick derecho: girar'],
+  'Olhe em volta: você pode\ncaminhar pelo espaço real.': ['Look around: you can\nwalk in the real space.', 'Mire alrededor: puede\ncaminar por el espacio real.'],
+  'Arraste o fundo com o mouse para girar\ne use a roda para aproximar.': ['Drag the background to orbit\nand use the wheel to zoom.', 'Arrastre el fondo para girar\ny use la rueda para acercar.'],
+  'Ligue a capela: toque com o dedo\nno botão verde ao lado do logo.': ['Turn on the hood: touch the green\nbutton next to the logo.', 'Encienda la cabina: toque el botón\nverde junto al logo.'],
+  'Clique no botão verde ao lado\ndo logo para ligar a capela.': ['Click the green button next to\nthe logo to turn on the hood.', 'Haga clic en el botón verde junto\nal logo para encender la cabina.'],
+  'Pegue um item na mesa de inox:\naproxime a mão e aperte o botão lateral (grip).\nPinça firme = gatilho + polegar no A/X.': ['Pick up an item on the steel table:\nreach out and squeeze the grip.\nFirm pinch = trigger + thumb on A/X.', 'Tome un objeto de la mesa de acero:\nacerque la mano y apriete el grip.\nPinza firme = gatillo + pulgar en A/X.'],
+  'Pegue um item na mesa de inox:\nfeche a mão sobre ele.': ['Pick up an item on the steel table:\nclose your hand on it.', 'Tome un objeto de la mesa de acero:\ncierre la mano sobre él.'],
+  'Clique e arraste um item\nda mesa de inox.': ['Click and drag an item\nfrom the steel table.', 'Haga clic y arrastre un objeto\nde la mesa de acero.'],
+  'Leve o item para dentro\nda capela e solte sobre a bancada.': ['Bring the item into the hood\nand release it on the surface.', 'Lleve el objeto a la cabina\ny suéltelo sobre la mesa.'],
+  'Segure a alça prateada do vidro com o grip\ne mova a mão para subir ou descer.': ['Grab the silver sash handle with the grip\nand move your hand up or down.', 'Sujete la manija plateada del vidrio con el grip\ny mueva la mano para subir o bajar.'],
+  'Feche a mão na alça prateada\ndo vidro e mova a mão.': ['Close your hand on the silver\nsash handle and move it.', 'Cierre la mano en la manija\nplateada y muévala.'],
+  'Arraste a alça prateada do vidro\npara cima ou para baixo.': ['Drag the silver sash handle\nup or down.', 'Arrastre la manija plateada\nhacia arriba o abajo.'],
+  'Pronto! Agora siga o procedimento\nno painel ao lado da capela.': ['Done! Now follow the procedure\non the panel.', '¡Listo! Ahora siga el procedimiento\nen el panel.'],
+  // dicas
+  'Abaixe o vidro até a altura de trabalho.': ['Lower the sash to working height.', 'Baje el vidrio a la altura de trabajo.'],
+  'Suba o vidro até a altura de trabalho.': ['Raise the sash to working height.', 'Suba el vidrio a la altura de trabajo.'],
+  'Abra bem o campo e apoie-o sobre a bancada, dentro da capela.': ['Open the pad fully and lay it on the surface, inside the hood.', 'Abra bien el campo y apóyelo sobre la mesa, dentro de la cabina.'],
+  'Acabaram os lenços: um novo AlcoolPrep foi colocado na mesa de inox.': ['Out of pads: a new AlcoolPrep was placed on the steel table.', 'Se acabaron las toallitas: se colocó un nuevo AlcoolPrep en la mesa de acero.'],
+  'Afaste as mãos para abrir o campo e apoie-o sobre a bancada da capela.': ['Move your hands apart to open the pad and lay it on the hood surface.', 'Separe las manos para abrir el campo y apóyelo sobre la mesa de la cabina.'],
+  'Ainda não: siga o passo atual do painel.': ['Not yet: follow the current step on the panel.', 'Todavía no: siga el paso actual del panel.'],
+  'Alinhado: desça o OncoSafe sobre o frasco.': ['Aligned: lower the OncoSafe onto the vial.', 'Alineado: baje el OncoSafe sobre el vial.'],
+  'Antes de encaixar, desinfete o septo com a gaze.': ['Before fitting, disinfect the septum with the pad.', 'Antes de encajar, desinfecte el septo con la toallita.'],
+  'Antes de forrar, limpe a bancada com o AlcoolPrep.': ['Before lining, wipe the surface with the AlcoolPrep.', 'Antes de cubrir, limpie la mesa con el AlcoolPrep.'],
+  'Arraste o pacote para rasgá-lo na marca "Rasgue aqui".': ['Drag the packet to tear it at the "Rasgue aqui" mark.', 'Arrastre el sobre para rasgarlo en la marca "Rasgue aqui".'],
+  'Com a outra mão, aperte o gatilho na borda do pacote e puxe para rasgar.': ['With the other hand, pinch the packet edge and pull to tear.', 'Con la otra mano, pellizque el borde del sobre y tire para rasgar.'],
+  'Esfregue o lenço no septo (movimentos de vai-e-vem).': ['Rub the pad on the septum (back-and-forth).', 'Frote la toallita en el septo (vaivén).'],
+  'Este lenço caiu no chão: está contaminado. Descarte e abra outro.': ['This pad fell on the floor: it is contaminated. Discard it and open another.', 'Esta toallita cayó al suelo: está contaminada. Deséchela y abra otra.'],
+  'Um lenço caiu no chão: está contaminado. Descarte-o e abra outro AlcoolPrep.': ['A pad fell on the floor: it is contaminated. Discard it and open another AlcoolPrep.', 'Una toallita cayó al suelo: está contaminada. Deséchela y abra otro AlcoolPrep.'],
+  'Há ar na seringa: empurre o êmbolo devagar para devolvê-lo ao frasco e complete.': ['There is air in the syringe: push the plunger slowly to return it to the vial, then top up.', 'Hay aire en la jeringa: empuje el émbolo despacio para devolverlo al vial y complete.'],
+  'Inverta o conjunto (frasco por cima) para aspirar o líquido.': ['Invert the assembly (vial on top) to draw the liquid.', 'Invierta el conjunto (vial arriba) para aspirar el líquido.'],
+  'Itens reiniciados (B/Y segurado).': ['Items reset (B/Y held).', 'Objetos reiniciados (B/Y mantenido).'],
+  'Mantenha a capela ligada.': ['Keep the hood on.', 'Mantenga la cabina encendida.'],
+  'Para injetar o ar, mantenha o frasco em pé.': ['To inject the air, keep the vial upright.', 'Para inyectar el aire, mantenga el vial de pie.'],
+  'Pinça firme na aba: gatilho + polegar no A/X.': ['Firm pinch on the tab: trigger + thumb on A/X.', 'Pinza firme en la pestaña: gatillo + pulgar en A/X.'],
+  'Pinça firme: aperte o gatilho e encoste o polegar no A/X.': ['Firm pinch: press the trigger and rest your thumb on A/X.', 'Pinza firme: apriete el gatillo y apoye el pulgar en A/X.'],
+  'Posição recentralizada (sentado).': ['Position recentered (seated).', 'Posición recentrada (sentado).'],
+  'Pressione a seringa até o clique.': ['Press the syringe until it clicks.', 'Presione la jeringa hasta el clic.'],
+  'Pressione a seringa no adaptador da bolsa até o clique.': ['Press the syringe onto the bag adapter until it clicks.', 'Presione la jeringa en el adaptador de la bolsa hasta el clic.'],
+  'Pressione firme: o spike está furando o septo…': ['Press firmly: the spike is piercing the septum…', 'Presione firme: el spike está perforando el septo…'],
+  'Pressione o OncoSafe para baixo até travar.': ['Press the OncoSafe down until it locks.', 'Presione el OncoSafe hacia abajo hasta trabar.'],
+  'Pressão positiva no frasco: aerossol escapando pela agulha!': ['Positive pressure in the vial: aerosol escaping around the needle!', '¡Presión positiva en el vial: aerosol escapando por la aguja!'],
+  'Puxe firme: o alumínio está esticando…': ['Pull firmly: the foil is stretching…', 'Tire firme: el aluminio se está estirando…'],
+  'Rasgando…': ['Tearing…', 'Rasgando…'],
+  'Segure o adaptador de seringa com a outra mão.': ['Hold the syringe adapter with the other hand.', 'Sujete el adaptador de jeringa con la otra mano.'],
+  'Segure o frasco com a outra mão para conectar.': ['Hold the vial with the other hand to connect.', 'Sujete el vial con la otra mano para conectar.'],
+  'Segure o frasco com a outra mão para perfurar.': ['Hold the vial with the other hand to pierce.', 'Sujete el vial con la otra mano para perforar.'],
+  'Segure o frasco com a outra mão primeiro.': ['Hold the vial with the other hand first.', 'Sujete primero el vial con la otra mano.'],
+  'Solte a tira e pince o lenço que ficou para fora da embalagem.': ['Drop the strip and pinch the pad sticking out of the packet.', 'Suelte la tira y pellizque la toallita que quedó fuera del sobre.'],
+  'Tire os itens de cima das grelhas (borda da frente e do fundo).': ['Remove items from the grilles (front and back edges).', 'Retire los objetos de las rejillas (borde delantero y trasero).'],
+  'Toque no botão verde ao lado do logo.': ['Touch the green button next to the logo.', 'Toque el botón verde junto al logo.'],
+  'Use as duas mãos: o frasco numa mão e o OncoSafe na outra.': ['Use both hands: the vial in one, the OncoSafe in the other.', 'Use las dos manos: el vial en una y el OncoSafe en la otra.'],
+  'Use o gatilho da OUTRA mão para pinçar o êmbolo.': ['Use the OTHER hand\'s trigger to pinch the plunger.', 'Use el gatillo de la OTRA mano para pellizcar el émbolo.'],
+  'Empurre a agulha através do septo.': ['Push the needle through the septum.', 'Empuje la aguja a través del septo.'],
+  'Empurre a agulha na porta da bolsa.': ['Push the needle into the bag port.', 'Empuje la aguja en el puerto de la bolsa.'],
+  'Gire a seringa ¼ de volta para rosquear no adaptador.': ['Turn the syringe ¼ to screw it onto the adapter.', 'Gire la jeringa ¼ de vuelta para enroscarla en el adaptador.'],
+  'Gire a seringa ¼ de volta para soltar do OncoSafe.': ['Turn the syringe ¼ to release it from the OncoSafe.', 'Gire la jeringa ¼ de vuelta para soltarla del OncoSafe.'],
+  'Modo SISTEMA ABERTO: observe o aerossol (verde) em cada etapa.': ['OPEN SYSTEM mode: watch the (green) aerosol at each step.', 'Modo SISTEMA ABIERTO: observe el aerosol (verde) en cada etapa.'],
+  'Modo SISTEMA FECHADO: OncoSafe, sem aerossol.': ['CLOSED SYSTEM mode: OncoSafe, no aerosol.', 'Modo SISTEMA CERRADO: OncoSafe, sin aerosol.'],
+  'Procedimento concluído': ['Procedure complete', 'Procedimiento concluido'],
+  'Abra um AlcoolPrep: segure o pacote numa mão e rasgue na marca "Rasgue aqui" com a outra.': ['Open an AlcoolPrep: hold the packet in one hand and tear at the "Rasgue aqui" mark with the other.', 'Abra un AlcoolPrep: sujete el sobre con una mano y rásguelo en la marca "Rasgue aqui" con la otra.'],
+  'Abra um AlcoolPrep: arraste o pacote para rasgá-lo.': ['Open an AlcoolPrep: drag the packet to tear it.', 'Abra un AlcoolPrep: arrastre el sobre para rasgarlo.'],
+  'Com a outra mão, pegue a ponta do campo e afaste as mãos para abrir.': ['With the other hand, grab the pad edge and move your hands apart to open it.', 'Con la otra mano, tome el borde del campo y separe las manos para abrirlo.'],
+  'Pegue o campo com uma mão e abra com a outra.': ['Pick up the pad with one hand and open it with the other.', 'Tome el campo con una mano y ábralo con la otra.'],
+  'Puxe para rasgar o pacote…': ['Pull to tear the packet…', 'Tire para rasgar el sobre…'],
+  'Esfregue o lenço no septo (movimentos de vai-e-vem).': ['Rub the pad on the septum (back-and-forth).', 'Frote la toallita en el septo (vaivén).'],
+  'Realidade mista: apoie o controle direito na borda da sua mesa real, à sua frente, e aperte o gatilho.': ['Mixed reality: rest the right controller on the edge of your real desk, in front of you, and pull the trigger.', 'Realidad mixta: apoye el control derecho en el borde de su mesa real, frente a usted, y apriete el gatillo.'],
+  'Mesa calibrada: a capela está sobre a sua mesa real.': ['Desk calibrated: the hood is on your real desk.', 'Mesa calibrada: la cabina está sobre su mesa real.'],
+  'Realidade mista indisponível neste aparelho/navegador.': ['Mixed reality unavailable on this device/browser.', 'Realidad mixta no disponible en este dispositivo/navegador.'],
+  'Clique no analógico esquerdo para recalibrar a mesa.': ['Click the left stick to recalibrate the desk.', 'Haga clic en el stick izquierdo para recalibrar la mesa.'],
+  'Voz indisponível neste navegador.': ['Voice unavailable in this browser.', 'Voz no disponible en este navegador.'],
+  'MODO DE JOGO': ['GAME MODE', 'MODO DE JUEGO'], 'seringa e agulha': ['syringe and needle', 'jeringa y aguja'], 'OncoSafe (CSTD)': ['OncoSafe (CSTD)', 'OncoSafe (CSTD)'],
+  'Itens reiniciados.': ['Items reset.', 'Objetos reiniciados.'],
+};
+// trechos para frases montadas (status, contagens): aplicados quando não há tradução exata
+const I18N_FRAG = [
+  ['PROCEDIMENTO CONCLUÍDO ✓', 'PROCEDURE COMPLETE ✓', 'PROCEDIMIENTO CONCLUIDO ✓'],
+  ['SISTEMA ABERTO', 'OPEN SYSTEM', 'SISTEMA ABIERTO'], ['SISTEMA FECHADO', 'CLOSED SYSTEM', 'SISTEMA CERRADO'], [' · FIM', ' · END', ' · FIN'],
+  ['Bolsa pronta e embalada · capela limpa · zero aerossol.', 'Bag ready and packed · hood clean · zero aerosol.', 'Bolsa lista y embalada · cabina limpia · cero aerosol.'],
+  ['Bolsa pronta · compare com o sistema fechado (botão na mesa).', 'Bag ready · compare with the closed system (button on the table).', 'Bolsa lista · compare con el sistema cerrado (botón en la mesa).'],
+  ['Contaminação por aerossol: 0 gotículas · sistema fechado (OncoSafe) ✓', 'Aerosol contamination: 0 droplets · closed system (OncoSafe) ✓', 'Contaminación por aerosol: 0 gotitas · sistema cerrado (OncoSafe) ✓'],
+  ['Confirme o encaixe: gire o OncoSafe nos 2 sentidos', 'Confirm the seating: twist the OncoSafe both ways', 'Confirme el encaje: gire el OncoSafe en ambos sentidos'],
+  ['(roda do mouse)', '(mouse wheel)', '(rueda del ratón)'],
+  ['Lenços prontos', 'Pads ready', 'Toallitas listas'], ['AlcoolPrep fechados', 'AlcoolPrep closed', 'AlcoolPrep cerrados'],
+  ['Materiais na capela', 'Materials in the hood', 'Materiales en la cabina'], ['Bancada limpa', 'Surface clean', 'Mesa limpia'],
+  ['Capela ligada', 'Hood on', 'Cabina encendida'], ['Capela desligada', 'Hood off', 'Cabina apagada'],
+  ['restantes', 'left', 'restantes'], ['(simulado)', '(simulated)', '(simulado)'], ['(simbólico)', '(symbolic)', '(simbólico)'],
+  ['desinfetado', 'disinfected', 'desinfectado'], ['Septo', 'Septum', 'Septo'], ['Purga', 'Purge', 'Purga'],
+  ['Seringa', 'Syringe', 'Jeringa'], ['líquido', 'liquid', 'líquido'], ['Frasco', 'Vial', 'Vial'], ['Bolsa', 'Bag', 'Bolsa'],
+  ['Balão', 'Balloon', 'Globo'], ['Pressão', 'Pressure', 'Presión'], ['equilibrada', 'balanced', 'equilibrada'], [' ar ', ' air ', ' aire '],
+  ['Contaminação', 'Contamination', 'Contaminación'], ['gotículas', 'droplets', 'gotitas'], ['luvas', 'gloves', 'guantes'],
+  ['fora da capela', 'outside the hood', 'fuera de la cabina'], ['manchas na bancada', 'stains on the surface', 'manchas en la mesa'], ['mín.', 'min.', 'mín.'],
+];
+function T(s) {
+  if (!s || LANG === 'pt') return s;
+  const k = LANG === 'en' ? 0 : 1, e = I18N[s];
+  if (e) return e[k];
+  let out = s;
+  for (const f of I18N_FRAG) if (out.includes(f[0])) out = out.split(f[0]).join(f[k + 1]);
+  if (LANG === 'en') out = out.replace(/(\d),(\d)/g, '$1.$2');            // 5,0 mL → 5.0 mL
+  return out;
+}
+function stepLabel(k, n) { return LANG === 'en' ? `STEP ${k} OF ${n}` : LANG === 'es' ? `PASO ${k} DE ${n}` : `PASSO ${k} DE ${n}`; }
+
+// ---------- narração (Web Speech API) ----------
+const tts = window.speechSynthesis || null;
+let lastSpoken = '', lastSpeakT = 0, pendingHint = null;
+function ttsVoice() {
+  if (!tts) return null;
+  const want = LANG_TTS[LANG], vs = tts.getVoices();
+  return vs.find(v => v.lang === want) || vs.find(v => v.lang?.startsWith(want.slice(0, 2))) || null;
+}
+function speak(text, interrupt = false) {
+  if (!voiceOn || !tts || !text) return;
+  const clean = text.replace(/[✓▶👉⚠↻↺…]/g, '').replace(/\s+/g, ' ').trim();
+  if (!clean || clean === lastSpoken) return;
+  if (interrupt) tts.cancel();
+  const u = new SpeechSynthesisUtterance(clean);
+  u.lang = LANG_TTS[LANG]; const v = ttsVoice(); if (v) u.voice = v;
+  u.rate = 1.03; u.volume = 0.9;
+  tts.speak(u); lastSpoken = clean; lastSpeakT = performance.now();
+}
+// lê o passo ao mudar; dicas só quando ficam na tela por 1,5 s e no máximo a cada 6 s
+let narrStep = -1, hintSince = 0, hintSeen = '';
+function updateNarration() {
+  if (!voiceOn || !P.vial) return;
+  const vr = renderer.xr.isPresenting;
+  if (P.step !== narrStep) {
+    narrStep = P.step;
+    if (P.allDone) speak(T('Procedimento concluído'), true);
+    else speak(`${stepLabel(P.step + 1, STEPS.length).toLowerCase()}. ${T(STEPS[P.step][vr ? 'vr' : (STEPS[P.step].pc ? 'pc' : 'vr')])}`, true);
+    hintSeen = ''; return;
+  }
+  const h = P.hint;
+  if (h !== hintSeen) { hintSeen = h; hintSince = performance.now(); return; }
+  if (h && performance.now() - hintSince > 1500 && performance.now() - lastSpeakT > 6000 && !tts?.speaking) speak(T(h));
+}
+
 
 // ===================== Procedimento completo em sistema fechado (CSTD) =====================
 // Fases: preparação da cabine → materiais → montagem e conexão → aspiração → transferência → finalização.
@@ -2554,7 +2887,7 @@ function applyShapes(item, def) {
 const shapeDef = k => ({ ...SHAPES[k], com: new THREE.Vector3(...SHAPES[k].com) });
 
 // ---------- cenário fixo: bandeja de saída (mesa de inox) e coletor de resíduo (dentro da capela) ----------
-const TRAY = { x: 0.98, z: 0.13, w: 0.2, d: 0.16, y: 0.75 };            // [ERGONOMIA]
+const TRAY = { x: 0.86, z: 0.19, w: 0.18, d: 0.14, y: 0.75 };           // [ERGONOMIA] abre espaço para os botões de realidade e idioma
 const WASTE = { x: 0.52, z: CZ - 0.205, w: 0.14, d: 0.14, h: 0.15, y: 0.578 };   // [ERGONOMIA] coletor na frente-direita da bancada (antes no fundo, a 66 cm)
 (function buildFixedProps() {
   const tm = new THREE.MeshStandardMaterial({ color: 0x2f7fc1, roughness: 0.5 });
@@ -2703,7 +3036,7 @@ function padTwoStart(i, p) {
   P.padTwo = { a: o, b: i, t: 0 };
   pad.visible = false;
   if (!padPreview) { padPreview = makeCloth(); scene.add(padPreview); }
-  padPreview.visible = true; gloveFlash[i] = 1; pulse(i, 0.5, 30); SFX.plastico(p, 0.4);
+  padPreview.visible = true; gloveFlash[i] = 1; fx('engage', null, [i]); SFX.plastico(p, 0.4);
   return true;
 }
 function updatePadTwo() {
@@ -2727,7 +3060,7 @@ function endPadTwo(place) {
   if (place && reached('campo') && span > 0.3 && insideSurface(new THREE.Vector3(pos.x, table.top, pos.z)) && pos.y < table.top + 0.15) {
     const cloth = padPreview; padPreview = null;      // o próprio pano da mão termina de abrir e assenta
     unfoldPadAt(P.pad, pos, t.t, cloth);
-    for (const k of [t.a, t.b]) pulse(k, 0.6, 50);
+    fx('place', null, [t.a, t.b]);
     return;
   }
   padPreview.visible = false;
@@ -2768,8 +3101,7 @@ function scrubFeedback(gz, dt, contact) {
   if (!contact || v < 0.06 || v > 3 || scrubT > 0) return 0;
   scrubT = 0.11;
   const hb = P.gauze?.userData.heldBy;
-  if (typeof hb === 'number') pulse(hb, Math.min(0.5, 0.15 + v * 0.4), 25);
-  sfxAt(gz, (o, t) => noiseHit(o, t, 2600, 0.9, 0.05, Math.min(0.12, 0.03 + v * 0.06)));
+  fx('scrub', gz, typeof hb === 'number' ? [hb] : [], v);
   return v;
 }
 
@@ -3003,7 +3335,7 @@ function spawnProcedure() {
   for (let k = 0; k < SACHES_N; k++) spawnSache(new THREE.Vector3(0.57 + (k % 3) * 0.045, T + 0.001, 0.00 + Math.floor(k / 3) * 0.06));
   P.gauze = null;
   P.label = addProcItem(buildLabel(), 'Etiqueta da bolsa', new THREE.Vector3(0.60, T + 0.001, 0.17), 'label', 'plastico');
-  P.pad = addProcItem(buildPadFolded(), 'Campo absorvente', new THREE.Vector3(0.77, T + 0.001, 0.12), 'pad', 'plastico');
+  P.pad = addProcItem(buildPadFolded(), 'Campo absorvente', new THREE.Vector3(0.79, T + 0.001, 0.02), 'pad', 'plastico');
   const ad = P.adapter;
   if (ad) ad.traverse(o => { if (o.isMesh && o.material.color && o.material.color.getHex() === 0xf4f4f1) ad.userData.luerMesh = o; });
   if (capelaOn) P.purgeLeft = PURGA_S;
@@ -3371,11 +3703,11 @@ function procGrab(i, p, mode) {                     // mode: 'grip' | 'pinch' (c
     else if (P.syrOn === 'bag' && reached('bolsa_desc')) zone = 'pull';
     else zone = null;
   }
-  if (zone === 'plunger') { startPlunger(i, p); gloveFlash[i] = 1; pulse(i, 0.5, 30); setPlungerGlow(false); return true; }
+  if (zone === 'plunger') { startPlunger(i, p); gloveFlash[i] = 1; fx('engage', null, [i]); setPlungerGlow(false); return true; }
   if (zone === 'twist') {
     const h = handWorld(i), o = P.vial.userData.heldBy, ho = typeof o === 'number' ? handWorld(o) : null;
     P.twist = { mode: 'disconnect', hand: i, other: o, lastQo: ho?.q, angle: 0, lastQ: h.q, start: h.p, baseQ: P.syringe.quaternion.clone(), lastClick: 0 };
-    gloveFlash[i] = 1; pulse(i, 0.5, 30); return true;
+    gloveFlash[i] = 1; fx('engage', null, [i]); return true;
   }
   if (zone === 'pull') { if (P.syrOn === 'vial') detachFromVial(i); else detachFromBag(i); return true; }
   if (P.syrOn === 'vial' && !syringeBaseOK(i)) {
@@ -3408,7 +3740,7 @@ function setLuerGlow(k) {
 }
 function twistClicks(t, pos) {                      // "catraca" a cada 15° girados
   const n = Math.floor(Math.abs(t.angle) / THREE.MathUtils.degToRad(15));
-  if (n > t.lastClick) { t.lastClick = n; SFX.clique(pos); if (typeof t.hand === 'number') pulse(t.hand, 0.3, 15); }
+  if (n > t.lastClick) { t.lastClick = n; fx('click', pos, typeof t.hand === 'number' ? [t.hand] : []); }
 }
 
 // ---------- PC: inverter o conjunto num suporte ----------
@@ -3485,7 +3817,8 @@ function updateProcedure(dt) {
   if (cleanOverlay) cleanOverlay.visible = (id === 'limpar1' || id === 'limpar2') || (!reached('limpar1') );
 
   // campo absorvente: abre ao ser solto na bancada da capela
-  if (reached('campo') && P.pad && !P.padSheet && !P.padAnim && !P.discarded.has(P.pad) && itemRestingIn(P.pad, p => insideSurface(p)) && !reached('descartar')) unfoldPad(P.pad);
+  // no Quest o campo só abre com as DUAS mãos (segura numa, pega a ponta com a outra e afasta); no PC, abre ao soltar na bancada
+  if (!renderer.xr.isPresenting && reached('campo') && P.pad && !P.padSheet && !P.padAnim && !P.discarded.has(P.pad) && itemRestingIn(P.pad, p => insideSurface(p)) && !reached('descartar')) unfoldPad(P.pad);
 
   // OncoSafe no frasco (só a partir do passo de montagem)
   if (P.adapter && !P.adapterOn) {
@@ -3630,7 +3963,8 @@ function updateProcedure(dt) {
     case 'ligar': ok = capelaOn && P.purgeLeft <= 0; if (!capelaOn) P.hint = P.hint || 'Toque no botão verde ao lado do logo.'; break;
     case 'limpar1': ok = cleanFraction() >= COBERTURA; break;
     case 'campo': ok = !!P.padSheet;
-      if (!ok && !P.padTwo && !P.padAnim && isHeldNum(P.pad)) P.hint = P.hint || 'Pegue a outra ponta do campo com a outra mão e afaste as mãos para abrir (ou apoie-o dobrado na bancada).';
+      if (!ok && !P.padTwo && !P.padAnim && renderer.xr.isPresenting) P.hint = P.hint || (isHeldNum(P.pad)
+        ? 'Com a outra mão, pegue a ponta do campo e afaste as mãos para abrir.' : 'Pegue o campo com uma mão e abra com a outra.');
       break;
     case 'vidro': {
       const s = sashStatus(), grills = grillsBlocked();
@@ -3676,6 +4010,7 @@ function updateProcedure(dt) {
   invBtn.textContent = P.stand === 'down' ? 'Desvirar conjunto (I)' : 'Inverter conjunto (I)';
   drawProcPanel();
   updateGuides();
+  updateNarration();                                   // [IDIOMA] voz
 }
 function insideSurface(p) { return p.x > table.minX && p.x < table.maxX && p.z > table.minZ && p.z < table.maxZ && p.y > table.top - 0.02 && p.y < table.top + 0.08; }
 function insideCapela(obj) {
@@ -3694,7 +4029,7 @@ function grillsBlocked() {                            // grelha da frente (borda
 
 // ---------- painel ----------
 let procPanelKey = '';
-function stepText(k, vr) { const s = STEPS[k]; return (vr ? s.vr : (s.pc || s.vr)); }
+function stepText(k, vr) { const s = STEPS[k]; return T(vr ? s.vr : (s.pc || s.vr)); }   // [IDIOMA]
 function statusLine() {
   const id = curStep();
   const mmss = s => `${Math.floor(s / 60)}:${String(Math.ceil(s % 60) === 60 ? 0 : Math.ceil(s % 60)).padStart(2, '0')}`;
@@ -3713,7 +4048,7 @@ function statusLine() {
 function drawProcPanel() {
   const vr = renderer.xr.isPresenting, k = P.step, id = curStep();
   const status = statusLine(), contam = contamLine();
-  const key = [vr, k, P.hint, status, P.allDone, contam, MODE].join('|');
+  const key = [vr, k, P.hint, status, P.allDone, contam, MODE, LANG].join('|');
   if (key === procPanelKey) return;
   procPanelKey = key;
   const g = panelCanvas.getContext('2d'), W = panelCanvas.width, H = panelCanvas.height;
@@ -3721,9 +4056,9 @@ function drawProcPanel() {
   g.fillStyle = 'rgba(16,22,30,0.92)'; g.beginPath(); g.roundRect(4, 4, W - 8, H - 8, 28); g.fill();
   g.fillStyle = P.allDone ? (isOpen() ? '#8a3b1e' : '#1e8a4c') : isOpen() ? '#a4461b' : '#005b9a'; g.beginPath(); g.roundRect(4, 4, W - 8, 84, [28, 28, 0, 0]); g.fill();
   g.fillStyle = '#fff'; g.textAlign = 'left'; g.font = 'bold 36px system-ui, sans-serif';
-  g.fillText(P.allDone ? 'PROCEDIMENTO CONCLUÍDO ✓' : `PASSO ${k + 1} DE ${STEPS.length}`, 32, 58);
+  g.fillText(P.allDone ? T('PROCEDIMENTO CONCLUÍDO ✓') : stepLabel(k + 1, STEPS.length), 32, 58);
   g.font = 'bold 24px system-ui, sans-serif'; g.textAlign = 'right';
-  g.fillText((isOpen() ? 'SISTEMA ABERTO · ' : 'SISTEMA FECHADO · ') + (P.allDone ? 'FIM' : STEPS[k].fase.toUpperCase()), W - 30, 56);
+  g.fillText(T(isOpen() ? 'SISTEMA ABERTO' : 'SISTEMA FECHADO') + ' · ' + (P.allDone ? T(' · FIM').slice(3) : T(STEPS[k].fase).toUpperCase()), W - 30, 56);
   // barra de progresso
   g.fillStyle = 'rgba(255,255,255,0.12)'; g.fillRect(24, 100, W - 48, 10);
   g.fillStyle = '#5ee08a'; g.fillRect(24, 100, (W - 48) * Math.min(1, k / STEPS.length), 10);
@@ -3740,14 +4075,14 @@ function drawProcPanel() {
   });
   if (P.hint && !P.allDone) {
     g.fillStyle = 'rgba(255,183,77,0.16)'; g.fillRect(16, H - 156, W - 32, 44);
-    g.fillStyle = '#ffcc80'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText('👉 ' + P.hint, 32, H - 126, W - 60);
+    g.fillStyle = '#ffcc80'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText('👉 ' + T(P.hint), 32, H - 126, W - 60);
   }
   // contaminação (aerossol): em destaque no sistema aberto, zero no fechado
-  g.fillStyle = isOpen() ? (P.contam > 0 ? '#ff8a65' : '#cfe3f2') : '#7fe0a6'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText(contam, 32, H - 74, W - 60);
-  g.fillStyle = '#cfe3f2'; g.font = '24px system-ui, sans-serif'; g.fillText(P.allDone ? (isOpen() ? 'Bolsa pronta · compare com o sistema fechado (botão na mesa).' : 'Bolsa pronta e embalada · capela limpa · zero aerossol.') : status, 32, H - 30, W - 60);
+  g.fillStyle = isOpen() ? (P.contam > 0 ? '#ff8a65' : '#cfe3f2') : '#7fe0a6'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText(T(contam), 32, H - 74, W - 60);
+  g.fillStyle = '#cfe3f2'; g.font = '24px system-ui, sans-serif'; g.fillText(T(P.allDone ? (isOpen() ? 'Bolsa pronta · compare com o sistema fechado (botão na mesa).' : 'Bolsa pronta e embalada · capela limpa · zero aerossol.') : status), 32, H - 30, W - 60);
   panelTex.needsUpdate = true;
-  countEl.textContent = P.allDone ? 'Procedimento concluído ✓' : `Passo ${k + 1}/${STEPS.length} · ${stepText(k, vr)}`;
-  drawMiniPanel(k + 1, STEPS.length, P.allDone ? 'Procedimento concluído' : stepText(k, vr), P.allDone ? '' : P.hint, P.allDone);   // [PAINEL] faixa compacta
+  countEl.textContent = P.allDone ? T('Procedimento concluído') + ' ✓' : `${stepLabel(k + 1, STEPS.length)} · ${stepText(k, vr)}`;
+  drawMiniPanel(k + 1, STEPS.length, P.allDone ? T('Procedimento concluído') : stepText(k, vr), P.allDone ? '' : T(P.hint), P.allDone);   // [PAINEL] faixa compacta
   countEl.classList.toggle('done', P.allDone);
   zone.material.color.set(P.allDone ? 0x5ee08a : 0x4fd1ff);
 }
@@ -3950,16 +4285,16 @@ function contamLine() {
 }
 
 // ---------- botão "Sistema aberto / fechado" na mesa de inox ----------
-const MODE_POS = new THREE.Vector3(1.072, 0.75, -0.30);    // [ERGONOMIA]
+const MODE_POS = new THREE.Vector3(1.072, 0.75, -0.33);    // [ERGONOMIA]
 let modeBtn = null, modeMat = null, modeLabelCtx = null, modeLabelTex = null, modePress = 0;
 function drawModeLabel() {
   const c = modeLabelCtx, W = 480, H = 160;
   c.fillStyle = '#2a2e33'; c.fillRect(0, 0, W, H);
   c.fillStyle = '#9aa3ab'; c.font = 'bold 34px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
-  c.fillText('MODO DE JOGO', W / 2, 34);
+  c.fillText(T('MODO DE JOGO'), W / 2, 34);
   c.fillStyle = isOpen() ? '#ff7a45' : '#5ee08a'; c.font = 'bold 50px system-ui, sans-serif';
-  c.fillText(isOpen() ? 'SISTEMA ABERTO' : 'SISTEMA FECHADO', W / 2, 98);
-  c.fillStyle = '#cfd6dc'; c.font = '26px system-ui, sans-serif'; c.fillText(isOpen() ? 'seringa e agulha' : 'OncoSafe (CSTD)', W / 2, 140);
+  c.fillText(T(isOpen() ? 'SISTEMA ABERTO' : 'SISTEMA FECHADO'), W / 2, 98);
+  c.fillStyle = '#cfd6dc'; c.font = '26px system-ui, sans-serif'; c.fillText(T(isOpen() ? 'seringa e agulha' : 'OncoSafe (CSTD)'), W / 2, 140);
   modeLabelTex.needsUpdate = true;
 }
 (function setupModeButton() {
@@ -3996,6 +4331,99 @@ function updateModeButton(dt) {
   modeBtn.position.y = 0.057 - 0.005 * Math.min(1, modePress * 3);
   modeMat.emissiveIntensity = modePress * 0.6;
 }
+// ===================== [REALIDADE] Botão de tipo de realidade: VR (laboratório virtual) ↔ realidade mista =====================
+// Realidade mista = sessão WebXR "immersive-ar" do Quest 3 (passthrough): a sala virtual some e a capela, a mesa de inox
+// e os materiais aparecem no seu ambiente real. Uma calibração rápida põe a bancada da capela sobre a sua mesa real.
+// Trocar o tipo de realidade exige reabrir a sessão (o navegador pede um toque): ao apertar o botão dentro do óculos,
+// a sessão atual fecha e aparece "Toque para entrar em realidade mista".
+let realityMode = 'vr', mrSupported = false, mrCal = false, switchPending = false, sessionMR = false, mrHintT = 0;
+const BG_VR = scene.background;
+try { navigator.xr?.isSessionSupported?.('immersive-ar').then(v => { mrSupported = !!v; drawExtraLabels(); }).catch(() => {}); } catch (e) {}
+function applyRealityLook(mr) {
+  environment.visible = !mr;
+  scene.background = mr ? null : BG_VR;
+  renderer.setClearColor(0xe8ecef, mr ? 0 : 1);
+  for (const sf of surfaces) if (sf.lab) sf.off = mr;          // bancadas da sala virtual não "seguram" a mão no modo misto
+}
+function pressReality() {
+  if (!mrSupported && realityMode === 'vr') { setHint('Realidade mista indisponível neste aparelho/navegador.', 3500); return; }
+  realityMode = realityMode === 'vr' ? 'mr' : 'vr';
+  drawExtraLabels(); updateEnterTexts();
+  if (renderer.xr.isPresenting) { switchPending = true; renderer.xr.getSession().end(); }
+}
+// calibração: controle apoiado na borda da mesa real → a borda da bancada da capela vai para esse ponto, na sua frente
+function calibrateDesk(i) {
+  const xrCam = renderer.xr.getCamera(); rig.updateMatrixWorld(true); xrCam.updateMatrixWorld(true);
+  const R = grips[i].position.clone();                       // ponto real (espaço de referência do Quest)
+  const f = new THREE.Vector3(0, 0, -1).applyQuaternion(xrCam.getWorldQuaternion(new THREE.Quaternion()));
+  rig.rotation.y = -(Math.atan2(-f.x, -f.z) - rig.rotation.y);
+  const W0 = new THREE.Vector3(SEAT.x, table.top, table.maxZ);
+  rig.position.copy(W0).sub(R.clone().applyAxisAngle(UP, rig.rotation.y));
+  mrCal = false; panelYaw = null;
+  fx('seated', W0, [i]); setHint('Mesa calibrada: a capela está sobre a sua mesa real.', 3500);
+}
+function updateMR(dt) {
+  if (!sessionMR || !mrCal) return;
+  mrHintT -= dt;
+  if (mrHintT <= 0) { mrHintT = 2; setHint('Realidade mista: apoie o controle direito na borda da sua mesa real, à sua frente, e aperte o gatilho.', 2600); }
+}
+function updateEnterTexts() {
+  const big = document.querySelector('#enterVR .big');
+  if (big) big.textContent = realityMode === 'mr' ? 'Toque para entrar em realidade mista' : 'Toque para entrar em VR';
+  if (typeof vrBtn !== 'undefined' && vrBtn && !renderer.xr.isPresenting && !vrBtn.disabled) vrBtn.textContent = realityMode === 'mr' ? 'Entrar em realidade mista' : 'Entrar em VR';
+}
+
+// ===================== [REALIDADE]/[IDIOMA] Botões extras na mesa de inox =====================
+const EXTRA_BTNS = [];
+function makeBenchButton({ pos, w = 0.05, d = 0.13, btns }) {
+  const g = new THREE.Group(); g.position.copy(pos); scene.add(g);
+  const housing = new THREE.Mesh(new RoundedBoxGeometry(w, 0.05, d, 3, 0.006), new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.45 }));
+  housing.position.y = 0.025; housing.castShadow = true; g.add(housing);
+  const lbl = document.createElement('canvas'); lbl.width = 480; lbl.height = 160;
+  const tex = new THREE.CanvasTexture(lbl); tex.colorSpace = THREE.SRGBColorSpace;
+  const label = new THREE.Mesh(new THREE.PlaneGeometry(d - 0.01, 0.04), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+  label.rotation.y = -Math.PI / 2; label.position.set(-w / 2 - 0.0005, 0.025, 0); g.add(label);
+  const ring = new THREE.MeshStandardMaterial({ color: 0xc9cdd2, metalness: 1, roughness: 0.3 });
+  const out = { group: g, ctx: lbl.getContext('2d'), tex, entries: [] };
+  for (const b of btns) {
+    const mat = new THREE.MeshStandardMaterial({ color: b.color, roughness: 0.35, emissive: 0xffffff, emissiveIntensity: 0 });
+    const r = b.r || 0.02, m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.014, 32), mat);
+    m.position.set(0, 0.057, b.z || 0); m.castShadow = true; g.add(m);
+    const rg = new THREE.Mesh(new THREE.TorusGeometry(r + 0.004, 0.003, 8, 32), ring); rg.rotation.x = Math.PI / 2; rg.position.set(0, 0.051, b.z || 0); g.add(rg);
+    const e = { btn: m, mat, fn: b.fn, press: 0 }; out.entries.push(e); EXTRA_BTNS.push(e);
+  }
+  colliders.push(new THREE.Box3(V3(pos.x - w / 2 - 0.001, pos.y, pos.z - d / 2), V3(pos.x + w / 2 + 0.001, pos.y + 0.065, pos.z + d / 2)));
+  return out;
+}
+function pressExtra(e) {
+  e.fn(); e.press = 1;
+  sfxAt(e.btn.getWorldPosition(new THREE.Vector3()), (o, t) => { noiseHit(o, t, 3000, 3, 0.02, 0.2); tone(o, t, 760, 0.1, 0.07, 'sine', 0.02); });
+}
+function updateExtraButtons(dt) {
+  for (const e of EXTRA_BTNS) { e.press = Math.max(0, e.press - dt * 2.5); e.btn.position.y = 0.057 - 0.005 * Math.min(1, e.press * 3); e.mat.emissiveIntensity = e.press * 0.6; }
+}
+const realBox = makeBenchButton({ pos: new THREE.Vector3(1.072, 0.75, 0.07), btns: [{ color: 0x6a4cff, fn: pressReality }] });
+const langBox = makeBenchButton({ pos: new THREE.Vector3(1.072, 0.75, 0.205), d: 0.11, btns: [
+  { color: 0xf2b705, z: -0.026, r: 0.016, fn: () => { LANG = { pt: 'en', en: 'es', es: 'pt' }[LANG]; try { localStorage.setItem('bmr_lang', LANG); } catch (e) {} drawExtraLabels(); drawModeLabel(); narrStep = -1; procPanelKey = ''; tut.lastKey = ''; } },
+  { color: 0x2e9d5a, z: 0.026, r: 0.016, fn: () => { voiceOn = !voiceOn; try { localStorage.setItem('bmr_voz', voiceOn ? '1' : '0'); } catch (e) {}
+      if (voiceOn && !tts) setHint('Voz indisponível neste navegador.', 3000); if (!voiceOn) tts?.cancel(); else { narrStep = -1; lastSpoken = ''; } drawExtraLabels(); } },
+] });
+function drawExtraLabels() {
+  { const c = realBox.ctx, W = 480, H = 160; c.fillStyle = '#2a2e33'; c.fillRect(0, 0, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#9aa3ab'; c.font = 'bold 32px system-ui, sans-serif'; c.fillText(LANG === 'en' ? 'REALITY' : LANG === 'es' ? 'REALIDAD' : 'REALIDADE', W / 2, 32);
+    c.fillStyle = realityMode === 'mr' ? '#b9a6ff' : '#7fd0ff'; c.font = 'bold 50px system-ui, sans-serif';
+    c.fillText(realityMode === 'mr' ? (LANG === 'en' ? 'MIXED' : LANG === 'es' ? 'MIXTA' : 'MISTA') : (LANG === 'en' ? 'VIRTUAL' : 'VIRTUAL'), W / 2, 96);
+    c.fillStyle = '#cfd6dc'; c.font = '24px system-ui, sans-serif';
+    c.fillText(mrSupported ? (realityMode === 'mr' ? 'passthrough · Quest 3' : 'laboratório completo') : 'mista indisponível aqui', W / 2, 140);
+    realBox.tex.needsUpdate = true; realBox.entries[0].mat.color.setHex(realityMode === 'mr' ? 0x8a6cff : 0x2f86d6); }
+  { const c = langBox.ctx, W = 480, H = 160; c.fillStyle = '#2a2e33'; c.fillRect(0, 0, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#9aa3ab'; c.font = 'bold 28px system-ui, sans-serif'; c.fillText('IDIOMA · LANGUAGE', W / 4 + 10, 30); c.fillText(LANG === 'en' ? 'VOICE' : 'VOZ', W * 3 / 4, 30);
+    c.fillStyle = '#ffd34d'; c.font = 'bold 46px system-ui, sans-serif'; c.fillText(LANG.toUpperCase(), W / 4 + 10, 96);
+    c.fillStyle = voiceOn ? '#5ee08a' : '#ff8a65'; c.fillText(voiceOn ? 'ON' : 'OFF', W * 3 / 4, 96);
+    c.fillStyle = '#cfd6dc'; c.font = '22px system-ui, sans-serif'; c.fillText(LANG_NAMES[LANG], W / 4 + 10, 140); c.fillText(tts ? '' : 'sem voz', W * 3 / 4, 140);
+    langBox.tex.needsUpdate = true; langBox.entries[1].mat.color.setHex(voiceOn ? 0x2e9d5a : 0x8a3b1e); }
+}
+drawExtraLabels();
 
 // ---------- setas-guia: o que pegar, para onde levar e qual movimento fazer em cada passo ----------
 let guidesOn = true;
@@ -4246,7 +4674,7 @@ spawnProcedure();
 
 buildStaticPhysics();
 
-window.game = { ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { applyRealityLook, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
@@ -4273,6 +4701,7 @@ renderer.setAnimationLoop(() => {
         (powerBtn && _p.distanceTo(powerBtn.getWorldPosition(_btn)) < 0.06) ||
         (resetBtn && _p.distanceTo(resetBtn.getWorldPosition(_btn)) < 0.07) ||
         (modeBtn && _p.distanceTo(modeBtn.getWorldPosition(_btn)) < 0.07) ||
+        EXTRA_BTNS.some(e => _p.distanceTo(e.btn.getWorldPosition(_btn)) < 0.05) ||
         !!syringeZone(i, _p);
       if (syringeZone(i, _p) === 'plunger') plungerHover = true;
       // quanto a mão já fechou (0 = aberta, 1 = no ponto de pegar)
@@ -4285,10 +4714,11 @@ renderer.setAnimationLoop(() => {
     setPlungerGlow(plungerHover && !P.plunger);      // o êmbolo acende: é ele que a mão livre vai pegar
   }
   updatePanelFollow(dt);                             // [PAINEL]
+  if (renderer.xr.isPresenting) qlUpdate();          // [PAINEL] camada nativa
   stepPhysics(dt);
   updateProcedure(Math.min(raw, 0.25));                  // timers do procedimento em tempo real
   updateCapela(dt, time);
-  updateResetButton(dt); updateModeButton(dt);
+  updateResetButton(dt); updateModeButton(dt); updateExtraButtons(dt); updateMR(dt);
   updateTutorial(Math.min(raw, 0.5));   // tempo real (não desacelera se o quadro atrasar)
   renderer.render(scene, camera);
 });
