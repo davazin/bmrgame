@@ -129,7 +129,6 @@
   <div class="opt"><span id="lblMode">Sistema</span><div class="seg" id="segMode"><button data-v="fechado">Fechado</button><button data-v="aberto">Aberto</button></div></div>
   <div class="opt"><span id="lblLang">Idioma</span><div class="seg" id="segLang"><button data-v="pt">PT</button><button data-v="en">EN</button><button data-v="es">ES</button></div></div>
   <div class="opt"><span id="lblVoice">Narração</span><label class="sw"><input type="checkbox" id="swVoice"><i></i></label></div>
-  <div class="opt"><span id="lblArms">Braços</span><label class="sw"><input type="checkbox" id="swArms" checked><i></i></label></div>
   <div class="opt"><span id="lblGuide">Setas-guia</span><label class="sw"><input type="checkbox" id="swGuide" checked><i></i></label></div>
   <button id="resetBtn">Reiniciar itens</button>
   <details id="advanced" style="display:none">
@@ -149,8 +148,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 // ---------- Configuração ----------
-const DEV = new URLSearchParams(location.search).has('dev');
-let armsOn = true; try { armsOn = localStorage.getItem('bmr_bracos') !== '0'; } catch (e) {}   // [BRAÇOS]   // [MENU] ?dev no endereço mostra as opções de desenvolvedor
+const DEV = new URLSearchParams(location.search).has('dev');   // [MENU] ?dev no endereço mostra as opções de desenvolvedor
 const GRAVITY = 9.81;
 
 // ---------- Renderer / cena ----------
@@ -2601,9 +2599,6 @@ const LANG_NAMES = { pt: 'PORTUGUÊS', en: 'ENGLISH', es: 'ESPAÑOL' };
 const LANG_TTS = { pt: 'pt-BR', en: 'en-US', es: 'es-ES' };
 // texto em português → [inglês, espanhol]
 const I18N = {
-  'Braços': ['Arms', 'Brazos'],
-  'Braço encostando no vidro: trabalhe por baixo da abertura ou suba o vidro.': ['Arm touching the sash: work below the opening or raise the sash.', 'Brazo tocando el vidrio: trabaje por debajo de la abertura o suba el vidrio.'],
-  'Braço apoiado na borda da bancada: levante um pouco o cotovelo.': ['Arm resting on the bench edge: lift your elbow a little.', 'Brazo apoyado en el borde de la mesa: levante un poco el codo.'],
   // [MENU]
   'Treinamento OncoSafe': ['OncoSafe Training', 'Entrenamiento OncoSafe'], 'Opções': ['Options', 'Opciones'], 'Sistema': ['System', 'Sistema'],
   'Idioma': ['Language', 'Idioma'], 'Narração': ['Narration', 'Narración'], 'Setas-guia': ['Guide arrows', 'Flechas guía'],
@@ -4974,15 +4969,14 @@ const swVoice = document.getElementById('swVoice'), swGuide = document.getElemen
 segMode.querySelectorAll('button').forEach(b => b.onclick = () => { if (b.dataset.v !== MODE) { pressMode(); syncMenu(); } });
 segLang.querySelectorAll('button').forEach(b => b.onclick = () => { if (b.dataset.v !== LANG) setLang(b.dataset.v); });
 swVoice.onchange = () => { setVoice(swVoice.checked); };
-document.getElementById('swArms').onchange = e => { armsOn = e.target.checked; try { localStorage.setItem('bmr_bracos', armsOn ? '1' : '0'); } catch (er) {} };   // [BRAÇOS]
 if (DEV) { document.getElementById('advanced').style.display = ''; document.getElementById('uiSub').dataset.dev = '1'; }
 let menuT0 = performance.now(), menuStep = -1, menuEnd = 0;
 const mmss = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 function syncMenu() {
   segMode.querySelectorAll('button').forEach(b => { b.classList.toggle('on', b.dataset.v === MODE); b.textContent = T(b.dataset.v === 'aberto' ? 'Aberto' : 'Fechado'); });
   segLang.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === LANG));
-  swVoice.checked = voiceOn; swGuide.checked = guidesOn; document.getElementById('swArms').checked = armsOn;
-  const txt = { uiTitle: 'Treinamento OncoSafe', secOpt: 'Opções', lblMode: 'Sistema', lblLang: 'Idioma', lblVoice: 'Narração', lblGuide: 'Setas-guia', lblArms: 'Braços', ctrlBtnUI: 'Ver controles', tutRestart: 'Rever tutorial' };
+  swVoice.checked = voiceOn; swGuide.checked = guidesOn;
+  const txt = { uiTitle: 'Treinamento OncoSafe', secOpt: 'Opções', lblMode: 'Sistema', lblLang: 'Idioma', lblVoice: 'Narração', lblGuide: 'Setas-guia', ctrlBtnUI: 'Ver controles', tutRestart: 'Rever tutorial' };
   for (const [id, t] of Object.entries(txt)) { const el = document.getElementById(id); if (el) el.textContent = T(t); }
   const rb = document.getElementById('resetBtn'); if (!rb.classList.contains('confirm')) rb.textContent = T('Reiniciar itens');
   if (vrBtn.dataset.k) vrBtn.textContent = T(vrBtn.dataset.k);
@@ -4999,137 +4993,8 @@ function updateMenuStatus() {
 setInterval(updateMenuStatus, 500);
 if (innerWidth < 700) { ui.classList.add('min'); document.getElementById('toggle').textContent = '+'; }   // tela estreita: começa recolhido
 syncMenu();
-window.game = { get arms(){return arms}, updateArms, get armsOn(){return armsOn}, setTearConfig, syncMenu, setVoice, get voicePlaying(){return voicePlaying}, hasClip, drawTutPanel, ensureTutPanel, narrationCatalog, voiceKey, setLang, showCtrlGuide, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { setTearConfig, syncMenu, setVoice, get voicePlaying(){return voicePlaying}, hasClip, drawTutPanel, ensureTutPanel, narrationCatalog, voiceKey, setLang, showCtrlGuide, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
-
-// ===================== [BRAÇOS] Braços do operador (avental de manga longa) com IK de 2 ossos =====================
-// Ombros estimados pela cabeça (o tronco gira devagar atrás do olhar). Cotovelo: o lado em que ele cai segue a
-// orientação do punho (a direção do antebraço que o controle/mão indica) misturada com a postura natural
-// (cotovelo para baixo e para fora). Mecânica real na capela: o braço passa por BAIXO do vidro e por CIMA da borda
-// da bancada; se a solução natural cruzaria o vidro, o cotovelo procura outra posição; se não houver, a manga fica
-// presa na borda do vidro (aparece apertada sob a borda) e o controle vibra — abaixe o braço ou suba o vidro.
-const ARM = { up: 0.29, fore: 0.265, shW: 0.175, rUp: 0.048, rEl: 0.041, rWr: 0.025 };
-const sleeveMat = new THREE.MeshStandardMaterial({ color: 0xdfe5ec, roughness: 0.88, metalness: 0 });   // avental impermeável
-const cuffMat = new THREE.MeshStandardMaterial({ color: 0xb9c3cf, roughness: 0.7 });                    // punho elástico
-const _unitCyl = new THREE.CylinderGeometry(1, 1, 1, 18, 1, true);
-function taperGeo(r0, r1) { return new THREE.CylinderGeometry(r1, r0, 1, 18, 1, true); }   // base = r0 (início), topo = r1 (fim)
-const arms = [0, 1].map(() => {
-  const g = new THREE.Group(); g.visible = false; scene.add(g);
-  const mk = (geo, mat) => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; m.frustumCulled = false; g.add(m); return m; };
-  const sph = new THREE.SphereGeometry(1, 16, 12);
-  return { g, upper: mk(taperGeo(ARM.rUp, ARM.rEl), sleeveMat), fore: mk(taperGeo(ARM.rEl, ARM.rWr), sleeveMat),
-    fore2: mk(taperGeo(ARM.rEl, ARM.rWr), sleeveMat), elbow: mk(sph, sleeveMat), shoulder: mk(sph, sleeveMat), bend: mk(sph, sleeveMat),
-    cuff: mk(new THREE.CylinderGeometry(ARM.rWr * 1.08, ARM.rWr * 1.08, 0.018, 18, 1, true), cuffMat),
-    elbowPrev: null, hapT: 0, blocked: 0 };
-});
-let bodyYaw = null;
-const _aS = new THREE.Vector3(), _aW = new THREE.Vector3(), _aF = new THREE.Vector3(), _aQ = new THREE.Quaternion();
-function placeSeg(mesh, a, b) {                          // cilindro de a até b
-  const d = _d.subVectors(b, a), len = d.length();
-  if (len < 1e-4) { mesh.visible = false; return; }
-  mesh.visible = true; mesh.position.addVectors(a, b).multiplyScalar(0.5);
-  mesh.quaternion.setFromUnitVectors(_UP, d.divideScalar(len)); mesh.scale.set(1, len, 1);
-}
-// pulso e direção do antebraço (do pulso para o cotovelo) da mão i, no mundo
-function wristOf(i) {
-  if (isHand[i]) {
-    const w = hands[i]?.joints?.['wrist']; if (!w || !w.visible && !glovesHand[i].group.visible) return null;
-    w.getWorldPosition(_aW); _aF.set(0, 0, 1).applyQuaternion(w.getWorldQuaternion(_aQ));
-    return { w: _aW.clone().addScaledVector(_aF, 0.045), f: _aF.clone() };
-  }
-  const ph = physHand[i], left = sources[i]?.handedness === 'left';
-  const wl = WRIST.clone(); wl.x *= left ? -1 : 1;
-  ph.localToWorld(_aW.copy(wl).add(V(0, 0.055, 0)));       // dentro do punho da luva (a luva cobre a manga)
-  _aF.set(0, 1, 0).applyQuaternion(ph.getWorldQuaternion(_aQ));
-  return { w: _aW.clone(), f: _aF.clone() };
-}
-// quanto o segmento P→Q atravessa um obstáculo da capela (0 = livre)
-function armViolation(P_, Q, r) {
-  const zg = CZ - 0.088, sashBot = SASH_BASE + sashOffset, zf = table.maxZ;
-  let v = 0, hit = null;
-  if ((P_.z - zg) * (Q.z - zg) < 0) {                    // plano do vidro: só passa por baixo da borda
-    const t = (zg - P_.z) / (Q.z - P_.z), X = P_.clone().lerp(Q, t);
-    if (Math.abs(X.x) < CAP_IN.x && X.y > sashBot - r && X.y < 2.0) { const e = X.y - (sashBot - r); if (e > v) { v = e; hit = { X, y: sashBot - r }; } }
-  }
-  if ((P_.z - zf) * (Q.z - zf) < 0) {                    // borda da bancada: passa por cima
-    const t = (zf - P_.z) / (Q.z - P_.z), X = P_.clone().lerp(Q, t);
-    if (Math.abs(X.x) < CAP_IN.x && X.y < table.top + r && X.y > table.top - 0.25) { const e = table.top + r - X.y; if (e > v) { v = e; hit = { X, y: table.top + r }; } }
-  }
-  return { v, hit };
-}
-function updateArms(dt) {
-  const show = armsOn && (renderer.xr.isPresenting || window.__armsTest);   // __armsTest: só para testes no PC
-  if (!show) { for (const a of arms) a.g.visible = false; return; }
-  const cam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
-  let hp = cam.getWorldPosition(new THREE.Vector3()), hq = cam.getWorldQuaternion(new THREE.Quaternion());
-  if (!renderer.xr.isPresenting && window.__armsHead) { hp = window.__armsHead.p.clone(); hq = window.__armsHead.q.clone(); }   // teste: cabeça fixa, câmera livre
-  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(hq); fwd.y = 0;
-  const headYaw = Math.atan2(-fwd.x, -fwd.z);
-  if (bodyYaw === null) bodyYaw = headYaw;
-  let dy = Math.atan2(Math.sin(headYaw - bodyYaw), Math.cos(headYaw - bodyYaw));
-  const dz = 0.35;                                       // ±20°: o tronco fica parado; além disso acompanha devagar
-  if (Math.abs(dy) > dz) bodyYaw += (dy - Math.sign(dy) * dz) * Math.min(1, dt * 3);
-  bodyYaw += dy * Math.min(1, dt * 0.4);
-  const bF = new THREE.Vector3(-Math.sin(bodyYaw), 0, -Math.cos(bodyYaw)), bR = new THREE.Vector3(-bF.z, 0, bF.x);
-  // pescoço: atrás e abaixo dos olhos (segue a inclinação da cabeça só em parte)
-  const neck = hp.clone().addScaledVector(bF, -0.09); neck.y -= 0.12;
-  for (let i = 0; i < 2; i++) {
-    const A = arms[i], src = sources[i];
-    const wr = src ? wristOf(i) : null;
-    if (!wr) { A.g.visible = false; continue; }
-    A.g.visible = true;
-    const side = src.handedness === 'left' ? -1 : 1;
-    const S = neck.clone().addScaledVector(bR, side * ARM.shW); S.y -= 0.12;
-    const W = wr.w, a = ARM.up, b = ARM.fore;
-    // alcance: o ombro avança até 8 cm na direção da mão (protração) antes de esticar o braço
-    let toW = W.clone().sub(S), d = toW.length();
-    if (d > a + b - 0.01) { S.addScaledVector(toW.normalize(), Math.min(0.08, d - (a + b - 0.01))); toW = W.clone().sub(S); d = toW.length(); }
-    d = THREE.MathUtils.clamp(d, Math.abs(a - b) + 0.02, a + b - 0.002);
-    const dir = W.clone().sub(S).normalize();
-    const cosA = (a * a + d * d - b * b) / (2 * a * d), sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
-    const C = S.clone().addScaledVector(dir, a * cosA), R = a * sinA;
-    // dica do cotovelo: antebraço que o punho indica + postura natural (para baixo, para fora, um pouco para trás)
-    const hintF = W.clone().addScaledVector(wr.f, b);
-    const hintB = S.clone().addScaledVector(bR, side * 0.22).add(V(0, -0.45, 0)).addScaledVector(bF, -0.1);
-    const hint = hintF.multiplyScalar(0.6).add(hintB.multiplyScalar(0.4));
-    let u = hint.sub(C); u.addScaledVector(dir, -u.dot(dir));
-    if (u.lengthSq() < 1e-8) u = V(0, -1, 0).addScaledVector(dir, dir.y);
-    u.normalize(); const w2 = new THREE.Vector3().crossVectors(dir, u);
-    // procura no círculo do cotovelo a posição mais natural que não atravesse o vidro nem a bancada
-    let best = null;
-    for (let k = 0; k < 24; k++) {
-      const th = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (Math.PI / 12);
-      const E = C.clone().addScaledVector(u, R * Math.cos(th)).addScaledVector(w2, R * Math.sin(th));
-      const v1 = armViolation(S, E, ARM.rEl), v2 = armViolation(E, W, ARM.rWr);
-      const cost = (v1.v + v2.v) * 40 + Math.abs(th) * 0.15 + (E.y > S.y ? (E.y - S.y) * 4 : 0);   // cotovelo acima do ombro: evita
-      if (!best || cost < best.cost) best = { cost, E, v: v1.v + v2.v, hit: v2.hit || v1.hit, th };
-    }
-    let E = best.E;
-    if (A.elbowPrev) E = A.elbowPrev.lerp(E, Math.min(1, dt * 18)).clone();   // amortece saltos do cotovelo
-    // reprojeta no comprimento do braço depois do amortecimento
-    E.sub(S).setLength(a).add(S);
-    A.elbowPrev = E.clone();
-    placeSeg(A.upper, S, E);
-    A.shoulder.position.copy(S); A.shoulder.scale.setScalar(ARM.rUp);
-    A.elbow.position.copy(E); A.elbow.scale.setScalar(ARM.rEl);
-    const vio = armViolation(E, W, ARM.rWr);
-    if (vio.v > 0.004 && vio.hit) {                      // manga presa: dobra sob a borda do vidro / sobre a bancada
-      const Cb = vio.hit.X.clone(); Cb.y = vio.hit.y;
-      placeSeg(A.fore, E, Cb); placeSeg(A.fore2, Cb, W);
-      A.bend.visible = true; A.bend.position.copy(Cb); A.bend.scale.setScalar(ARM.rWr * 1.35);
-      A.blocked = vio.v;
-      A.hapT -= dt;
-      if (A.hapT <= 0) { A.hapT = 0.12; fx('wall', Cb, [i], Math.min(1, vio.v * 10)); }
-      if (vio.hit.y < table.top + 0.1) setHint('Braço apoiado na borda da bancada: levante um pouco o cotovelo.', 1500);
-      else setHint('Braço encostando no vidro: trabalhe por baixo da abertura ou suba o vidro.', 1500);
-    } else {
-      placeSeg(A.fore, E, W); A.fore2.visible = false; A.bend.visible = false; A.blocked = 0;
-    }
-    // punho elástico do avental (por baixo do punho da luva)
-    A.cuff.position.copy(W).addScaledVector(wr.f, 0.01);
-    A.cuff.quaternion.setFromUnitVectors(_UP, wr.f);
-  }
-}
 // ---------- Loop ----------
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
@@ -5138,7 +5003,6 @@ renderer.setAnimationLoop(() => {
   if (renderer.xr.isPresenting) {
     updateSeat();                                      // [ERGONOMIA]
     updateHands(dt);
-    updateArms(dt);                                    // [BRAÇOS]
     updateLocomotion(dt);
     trackHistory(time);
     const next = new Set();
@@ -5174,7 +5038,6 @@ renderer.setAnimationLoop(() => {
   updateProcedure(Math.min(raw, 0.25));                  // timers do procedimento em tempo real
   updateCapela(dt, time);
   updateResetButton(dt); updateModeButton(dt); updateExtraButtons(dt);
-  if (!renderer.xr.isPresenting) updateArms(dt);      // [BRAÇOS] esconde fora do VR (ou desenha no teste)
   updateTutorial(Math.min(raw, 0.5));   // tempo real (não desacelera se o quadro atrasar)
   renderer.render(scene, camera);
 });
