@@ -15,8 +15,32 @@
   }
   #ui h1 { font-size: 15px; margin: 0 0 4px; }
   #ui .muted { color: #9aa0a6; }
-  #count { font-size: 22px; font-weight: 700; margin: 8px 0; }
+  /* [MENU] cartão do passo atual, grupos e chaves */
+  #ui { width: 310px; max-height: calc(100vh - 24px); overflow-y: auto; }
+  #stepCard { margin: 10px 0 4px; padding: 10px 12px; border-radius: 10px; background: #1b2632; border: 1px solid #2a3b4c; }
+  #stepCard .top { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .04em; color: #8fb3cc; }
+  #stepCard .bar { height: 5px; border-radius: 3px; background: #2a3b4c; margin: 6px 0 8px; overflow: hidden; }
+  #stepCard .bar i { display: block; height: 100%; width: 0; background: #2f9be0; transition: width .4s; }
+  #count { font-size: 15px; font-weight: 600; line-height: 1.35; color: #fff; }
   #count.done { color: #5ee08a; }
+  #stepHint { margin-top: 6px; font-size: 12.5px; color: #ffcc80; display: none; }
+  #stepHint.show { display: block; }
+  .uiRow { display: flex; gap: 6px; } .uiRow button { margin-top: 6px; font-size: 12.5px; padding: 7px 6px; }
+  .uiSec { margin: 12px 0 2px; font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #8a929b; text-transform: uppercase; }
+  .opt { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; }
+  .seg { display: flex; border: 1px solid #444; border-radius: 8px; overflow: hidden; }
+  .seg button { width: auto; margin: 0; border: 0; border-radius: 0; padding: 5px 10px; font-size: 12px; background: #262a31; color: #cfd6dc; }
+  .seg button + button { border-left: 1px solid #444; }
+  .seg button.on { background: #2f6fed; color: #fff; font-weight: 700; }
+  #segMode button.on[data-v="aberto"] { background: #c2541f; }
+  .sw { position: relative; width: 40px; height: 22px; flex: none; cursor: pointer; }
+  .sw input { display: none; } .sw i { position: absolute; inset: 0; border-radius: 11px; background: #444; transition: background .2s; }
+  .sw i::after { content: ''; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left .2s; }
+  .sw input:checked + i { background: #2e9d5a; } .sw input:checked + i::after { left: 21px; }
+  #resetBtn { margin-top: 12px; background: #3a2222; border-color: #7a3a3a; color: #ffb4a8; }
+  #resetBtn.confirm { background: #b3261e; border-color: #e0463d; color: #fff; font-weight: 700; }
+  #vrBtn { font-size: 15px; padding: 11px 10px; }
+  #msg:empty { display: none; }
   button, label.file {
     display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 9px 10px;
     border-radius: 8px; border: 1px solid #444; background: #262a31; color: #fff; font-size: 13px;
@@ -89,22 +113,28 @@
 <div id="tutorial"><div class="top"><span>TUTORIAL</span><span id="tutStep"></span></div><div id="tutText"></div><button id="tutSkip">Pular tutorial</button></div>
 <div id="ui">
   <button id="toggle">–</button>
-  <h1>Procedimento na capela</h1>
-  <div class="muted">Protótipo WebXR · Meta Quest 3</div>
-  <div id="count">Itens na capela: 0 / 0</div>
+  <h1 id="uiTitle">Treinamento OncoSafe</h1>
+  <div class="muted" id="uiSub">BMR Medical</div>
+  <div id="stepCard">
+    <div class="top"><span id="stepNum">PASSO 1 DE 23</span><span id="stepPhase"></span></div>
+    <div class="bar"><i id="stepBar"></i></div>
+    <div id="count"></div>
+    <div id="stepHint"></div>
+  </div>
   <button id="vrBtn" disabled>Verificando VR…</button>
-  <button id="resetBtn">Reiniciar itens</button>
-  <button id="tutRestart">Rever tutorial</button>
-  <button id="ctrlBtnUI">Ver controles</button>
-  <button id="guideBtn">Setas-guia: ligadas</button>
-  <button id="invBtn" style="display:none;background:#8a5a00;border-color:#b07400">Inverter conjunto (I)</button>
-  <label class="file">Carregar ambiente (.glb – SketchUp)<input type="file" id="envFile" accept=".glb,.gltf"></label>
-  <label class="file">Adicionar item (.glb – SolidWorks)<input type="file" id="itemFile" accept=".glb,.gltf" multiple></label>
   <div id="msg"></div>
-  <details>
-    <summary>Controles</summary>
-    <p><b>No Quest:</b> botão lateral (grip) fecha os 3 dedos e segura com a mão; gatilho fecha o indicador; A/X fecha o polegar. Gatilho + A/X = pinça firme (êmbolo, aba do AlcoolPrep). Um item na mão não passa direto para a outra: solte na bancada antes. As mãos não atravessam as bancadas (sem controle: feche a mão para pegar e abra para soltar). Analógico esquerdo anda, direito gira 30°. Segure B/Y por 2 s ou use o botão azul REINICIAR da mesa para reiniciar; B/Y pula o tutorial; clique no analógico esquerdo para recentralizar sentado. Toque o botão verde da capela com o dedo para ligar; segure a alça prateada para mover o vidro.</p>
-    <p><b>No PC:</b> clique e arraste um item para movê-lo; solte para ele cair. A roda do mouse gira o item enquanto arrasta. Clique no botão verde para ligar a capela e arraste a alça do vidro. Arraste o fundo para girar a câmera.</p>
+  <div class="uiRow"><button id="ctrlBtnUI">Ver controles</button><button id="tutRestart">Rever tutorial</button></div>
+  <button id="invBtn" style="display:none;background:#8a5a00;border-color:#b07400">Inverter conjunto (I)</button>
+  <div class="uiSec" id="secOpt">Opções</div>
+  <div class="opt"><span id="lblMode">Sistema</span><div class="seg" id="segMode"><button data-v="fechado">Fechado</button><button data-v="aberto">Aberto</button></div></div>
+  <div class="opt"><span id="lblLang">Idioma</span><div class="seg" id="segLang"><button data-v="pt">PT</button><button data-v="en">EN</button><button data-v="es">ES</button></div></div>
+  <div class="opt"><span id="lblVoice">Narração</span><label class="sw"><input type="checkbox" id="swVoice"><i></i></label></div>
+  <div class="opt"><span id="lblGuide">Setas-guia</span><label class="sw"><input type="checkbox" id="swGuide" checked><i></i></label></div>
+  <button id="resetBtn">Reiniciar itens</button>
+  <details id="advanced" style="display:none">
+    <summary>Avançado (desenvolvedor)</summary>
+    <label class="file">Carregar ambiente (.glb – SketchUp)<input type="file" id="envFile" accept=".glb,.gltf"></label>
+    <label class="file">Adicionar item (.glb – SolidWorks)<input type="file" id="itemFile" accept=".glb,.gltf" multiple></label>
   </details>
 </div>
 
@@ -118,6 +148,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 // ---------- Configuração ----------
+const DEV = new URLSearchParams(location.search).has('dev');   // [MENU] ?dev no endereço mostra as opções de desenvolvedor
 const GRAVITY = 9.81;
 
 // ---------- Renderer / cena ----------
@@ -655,7 +686,13 @@ function resetItems() {
   }
   resetProcedure();                                          // procedimento volta ao início, materiais separados na mesa
 }
-document.getElementById('resetBtn').onclick = resetItems;
+// [MENU] no menu, reiniciar pede confirmação (2º clique em até 3 s); o botão azul da mesa continua direto
+{ const rb = document.getElementById('resetBtn'); let rbT = 0;
+  rb.onclick = () => {
+    if (rb.classList.contains('confirm')) { clearTimeout(rbT); rb.classList.remove('confirm'); rb.textContent = T('Reiniciar itens'); resetItems(); return; }
+    rb.classList.add('confirm'); rb.textContent = T('Clique de novo para confirmar');
+    rbT = setTimeout(() => { rb.classList.remove('confirm'); rb.textContent = T('Reiniciar itens'); }, 3000);
+  }; }
 
 // ---------- Destaque ----------
 const highlighted = new Set();
@@ -1468,11 +1505,11 @@ const msg = document.getElementById('msg');
   try { ok = !!navigator.xr && await navigator.xr.isSessionSupported('immersive-vr'); } catch (e) {}
   if (!ok) {
     if (!tutSeen('pc')) startTutorial('pc');
-    vrBtn.textContent = 'VR indisponível aqui';
-    msg.textContent = 'Abra esta página no navegador do Quest a partir de um endereço https próprio (ex.: GitHub Pages). Dentro do claude.ai o VR é bloqueado.';
+    vrBtn.textContent = T('VR indisponível aqui'); vrBtn.dataset.k = 'VR indisponível aqui';
+    msg.textContent = DEV ? 'Abra esta página no navegador do Quest a partir de um endereço https próprio (ex.: GitHub Pages). Dentro do claude.ai o VR é bloqueado.' : '';
     return;
   }
-  vrBtn.disabled = false; vrBtn.textContent = 'Entrar em VR';
+  vrBtn.disabled = false; vrBtn.textContent = T('Entrar em VR'); vrBtn.dataset.k = 'Entrar em VR';
   const overlay = document.getElementById('enterVR');
   async function startVR() {
     if (renderer.xr.isPresenting) { renderer.xr.getSession().end(); return; }
@@ -1486,9 +1523,9 @@ const msg = document.getElementById('msg');
       qlInit(session);                                 // [PAINEL] camada nativa (se o Quest oferecer)
       if (tut.step >= 0 && tut.mode === 'pc') endTutorial();
       if (!tutSeen('vr')) startTutorial('vr');
-      vrBtn.textContent = 'Sair do VR';
+      vrBtn.textContent = T('Sair do VR'); vrBtn.dataset.k = 'Sair do VR';
       session.addEventListener('end', () => {
-        vrBtn.textContent = 'Entrar em VR';
+        vrBtn.textContent = T('Entrar em VR'); vrBtn.dataset.k = 'Entrar em VR';
         for (let i = 0; i < 2; i++) release(i);
         rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);   // [ERGONOMIA] volta ao normal fora do VR
         QL.ok = false;
@@ -2562,6 +2599,15 @@ const LANG_NAMES = { pt: 'PORTUGUÊS', en: 'ENGLISH', es: 'ESPAÑOL' };
 const LANG_TTS = { pt: 'pt-BR', en: 'en-US', es: 'es-ES' };
 // texto em português → [inglês, espanhol]
 const I18N = {
+  // [MENU]
+  'Treinamento OncoSafe': ['OncoSafe Training', 'Entrenamiento OncoSafe'], 'Opções': ['Options', 'Opciones'], 'Sistema': ['System', 'Sistema'],
+  'Idioma': ['Language', 'Idioma'], 'Narração': ['Narration', 'Narración'], 'Setas-guia': ['Guide arrows', 'Flechas guía'],
+  'Ver controles': ['Show controls', 'Ver controles'], 'Rever tutorial': ['Replay tutorial', 'Repetir tutorial'],
+  'Fechado': ['Closed', 'Cerrado'], 'Aberto': ['Open', 'Abierto'], 'Reiniciar itens': ['Reset items', 'Reiniciar objetos'],
+  'Clique de novo para confirmar': ['Click again to confirm', 'Haga clic otra vez para confirmar'],
+  'Sistema aberto': ['Open system', 'Sistema abierto'], 'Sistema fechado': ['Closed system', 'Sistema cerrado'],
+  'CONCLUÍDO': ['COMPLETED', 'COMPLETADO'], 'VR indisponível aqui': ['VR not available here', 'VR no disponible aquí'],
+  'Entrar em VR': ['Enter VR', 'Entrar en VR'], 'Sair do VR': ['Exit VR', 'Salir de VR'],
   'Como jogar: controles': ['How to play: controls', 'Cómo jugar: controles'],
   'Veja qual botão usar em cada ação. Você pode rever esta tela no menu (Ver controles).': ['See which button to use for each action. You can reopen this screen from the menu (Show controls).', 'Vea qué botón usar en cada acción. Puede volver a esta pantalla en el menú (Ver controles).'],
   'Controles do Quest': ['Quest controllers', 'Controles del Quest'], 'Mãos (sem controle)': ['Hands (no controllers)', 'Manos (sin controles)'], 'Mouse (PC)': ['Mouse (PC)', 'Ratón (PC)'],
@@ -4263,7 +4309,12 @@ function drawProcPanel() {
   g.fillStyle = isOpen() ? (P.contam > 0 ? '#ff8a65' : '#cfe3f2') : '#7fe0a6'; g.font = 'bold 24px system-ui, sans-serif'; g.fillText(T(contam), 32, H - 74, W - 60);
   g.fillStyle = '#cfe3f2'; g.font = '24px system-ui, sans-serif'; g.fillText(T(P.allDone ? (isOpen() ? 'Bolsa pronta · compare com o sistema fechado (botão na mesa).' : 'Bolsa pronta e embalada · capela limpa · zero aerossol.') : status), 32, H - 30, W - 60);
   panelTex.needsUpdate = true;
-  countEl.textContent = P.allDone ? T('Procedimento concluído') + ' ✓' : `${stepLabel(k + 1, STEPS.length)} · ${stepText(k, vr)}`;
+  countEl.textContent = P.allDone ? T('Procedimento concluído') + ' ✓' : stepText(k, vr);      // [MENU] cartão do passo
+  document.getElementById('stepNum').textContent = P.allDone ? T('CONCLUÍDO') : stepLabel(k + 1, STEPS.length);
+  document.getElementById('stepPhase').textContent = P.allDone ? '' : T(STEPS[k].fase || '');
+  document.getElementById('stepBar').style.width = `${Math.round(100 * (P.allDone ? 1 : k / STEPS.length))}%`;
+  { const sh = document.getElementById('stepHint'), ht = !P.allDone && P.hint ? '👉 ' + T(P.hint) : '';
+    if (sh.textContent !== ht) sh.textContent = ht; sh.classList.toggle('show', !!ht); }
   drawMiniPanel(k + 1, STEPS.length, P.allDone ? T('Procedimento concluído') : stepText(k, vr), P.allDone ? '' : T(P.hint), P.allDone);   // [PAINEL] faixa compacta
   countEl.classList.toggle('done', P.allDone);
   zone.material.color.set(P.allDone ? 0x5ee08a : 0x4fd1ff);
@@ -4544,8 +4595,7 @@ function updateExtraButtons(dt) {
 }
 const langBox = makeBenchButton({ pos: new THREE.Vector3(1.072, 0.75, 0.205), d: 0.11, btns: [
   { color: 0xf2b705, z: -0.026, r: 0.016, fn: () => setLang({ pt: 'en', en: 'es', es: 'pt' }[LANG]) },
-  { color: 0x2e9d5a, z: 0.026, r: 0.016, fn: () => { voiceOn = !voiceOn; try { localStorage.setItem('bmr_voz', voiceOn ? '1' : '0'); } catch (e) {}
-      if (!voiceOn) stopVoice(); else { primeVoice(); narrStep = -1; lastSpoken = ''; } drawExtraLabels(); } },
+  { color: 0x2e9d5a, z: 0.026, r: 0.016, fn: () => setVoice(!voiceOn) },
 ] });
 function drawExtraLabels() {
   { const c = langBox.ctx, W = 480, H = 160; c.fillStyle = '#2a2e33'; c.fillRect(0, 0, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
@@ -4799,8 +4849,7 @@ function updateGuides() {
   if (!guidesOn || P.allDone || !P.vial) return;
   try { guideStep(); } catch (e) { /* item ainda não existe neste passo */ }
 }
-const guideBtn = document.getElementById('guideBtn');
-if (guideBtn) guideBtn.onclick = () => { guidesOn = !guidesOn; guideBtn.textContent = guidesOn ? 'Setas-guia: ligadas' : 'Setas-guia: desligadas'; };
+document.getElementById('swGuide').onchange = e => { guidesOn = e.target.checked; };   // [MENU] chave das setas-guia
 
 spawnProcedure();
 
@@ -4839,10 +4888,16 @@ const CG_ROWS = {
 };
 let cgTab = navigator.xr ? 'quest' : 'pc';
 const cgEl = document.getElementById('ctrlGuide'), cgCard = document.getElementById('ctrlCard');
+function setVoice(on) {                       // [MENU] usado pelo botão da mesa e pela chave do menu
+  voiceOn = on; try { localStorage.setItem('bmr_voz', voiceOn ? '1' : '0'); } catch (e) {}
+  if (!voiceOn) stopVoice(); else { primeVoice(); narrStep = -1; lastSpoken = ''; narrTut = ''; }
+  drawExtraLabels(); syncMenu();
+}
 function setLang(l) {
   LANG = l; try { localStorage.setItem('bmr_lang', LANG); } catch (e) {}
   drawExtraLabels(); drawModeLabel(); voiceMode = 'auto'; stopVoice(); narrStep = -1; procPanelKey = ''; tut.lastKey = '';
   if (cgEl.classList.contains('show')) renderCtrlGuide();
+  syncMenu();
 }
 function renderCtrlGuide() {
   const tabs = [['quest', 'Controles do Quest'], ['hands', 'Mãos (sem controle)'], ['pc', 'Mouse (PC)']];
@@ -4865,7 +4920,39 @@ cgEl.addEventListener('pointerdown', ev => ev.stopPropagation());
 cgEl.addEventListener('click', ev => ev.stopPropagation());
 document.getElementById('ctrlBtnUI').onclick = () => showCtrlGuide();
 showCtrlGuide();
-window.game = { get voicePlaying(){return voicePlaying}, hasClip, drawTutPanel, ensureTutPanel, narrationCatalog, voiceKey, setLang, showCtrlGuide, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+
+// ===================== [MENU] Menu lateral: passo atual, ajuda, opções (espelha os botões da mesa) =====================
+// Modo, idioma e narração continuam na bancada do VR; o menu mostra e altera o mesmo estado.
+const segMode = document.getElementById('segMode'), segLang = document.getElementById('segLang');
+const swVoice = document.getElementById('swVoice'), swGuide = document.getElementById('swGuide');
+segMode.querySelectorAll('button').forEach(b => b.onclick = () => { if (b.dataset.v !== MODE) { pressMode(); syncMenu(); } });
+segLang.querySelectorAll('button').forEach(b => b.onclick = () => { if (b.dataset.v !== LANG) setLang(b.dataset.v); });
+swVoice.onchange = () => { setVoice(swVoice.checked); };
+if (DEV) { document.getElementById('advanced').style.display = ''; document.getElementById('uiSub').dataset.dev = '1'; }
+let menuT0 = performance.now(), menuStep = -1, menuEnd = 0;
+const mmss = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+function syncMenu() {
+  segMode.querySelectorAll('button').forEach(b => { b.classList.toggle('on', b.dataset.v === MODE); b.textContent = T(b.dataset.v === 'aberto' ? 'Aberto' : 'Fechado'); });
+  segLang.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === LANG));
+  swVoice.checked = voiceOn; swGuide.checked = guidesOn;
+  const txt = { uiTitle: 'Treinamento OncoSafe', secOpt: 'Opções', lblMode: 'Sistema', lblLang: 'Idioma', lblVoice: 'Narração', lblGuide: 'Setas-guia', ctrlBtnUI: 'Ver controles', tutRestart: 'Rever tutorial' };
+  for (const [id, t] of Object.entries(txt)) { const el = document.getElementById(id); if (el) el.textContent = T(t); }
+  const rb = document.getElementById('resetBtn'); if (!rb.classList.contains('confirm')) rb.textContent = T('Reiniciar itens');
+  if (vrBtn.dataset.k) vrBtn.textContent = T(vrBtn.dataset.k);
+  procPanelKey = '';                                   // redesenha o cartão do passo no idioma novo
+}
+function updateMenuStatus() {
+  if (P.step === 0) menuT0 = performance.now();                           // cronômetro começa ao concluir o 1º passo
+  if (P.allDone && !menuEnd) menuEnd = performance.now(); if (!P.allDone) menuEnd = 0;
+  menuStep = P.step;
+  const t = ((menuEnd || performance.now()) - menuT0) / 1000;
+  document.getElementById('uiSub').textContent = `BMR Medical · ${T(isOpen() ? 'Sistema aberto' : 'Sistema fechado')} · ⏱ ${mmss(t)}`;
+  if (segMode.querySelector('.on')?.dataset.v !== MODE || swVoice.checked !== voiceOn || segLang.querySelector('.on')?.dataset.v !== LANG) syncMenu();
+}
+setInterval(updateMenuStatus, 500);
+if (innerWidth < 700) { ui.classList.add('min'); document.getElementById('toggle').textContent = '+'; }   // tela estreita: começa recolhido
+syncMenu();
+window.game = { syncMenu, setVoice, get voicePlaying(){return voicePlaying}, hasClip, drawTutPanel, ensureTutPanel, narrationCatalog, voiceKey, setLang, showCtrlGuide, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
