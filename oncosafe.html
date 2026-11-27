@@ -3403,6 +3403,7 @@ function buildSache() {
   // pique do "Rasgue aqui" na borda lateral, na linha do rasgo
   const notch = new THREE.Mesh(new THREE.BoxGeometry(0.004, SACHE_T * 1.2, 0.0012), new THREE.MeshBasicMaterial({ color: 0x2a2e33 }));
   notch.position.set(SACHE_W / 2 - 0.0018, SACHE_T / 2, tearZ); g.add(notch);
+  const notch2 = notch.clone(); notch2.position.x = -SACHE_W / 2 + 0.0018; g.add(notch2);   // [RASGO2] pique dos dois lados
   // linha do rasgo (alumínio aberto, com o lenço branco aparecendo) que cresce a partir do pique
   const line = new THREE.Mesh(new THREE.BoxGeometry(1, SACHE_T * 1.05, 0.0016).translate(-0.5, 0, 0),
     new THREE.MeshStandardMaterial({ color: 0xe6eef2, roughness: 0.7, emissive: 0x222222 }));
@@ -3414,8 +3415,33 @@ function setTearVisual(S, k) {
   const pt = S?.children[0]?.userData.parts; if (!pt) return;
   k = THREE.MathUtils.clamp(k, 0, 1);
   const e = k * k * (3 - 2 * k);                      // suave
-  pt.pivot.rotation.set(0, -0.34 * e, 0.16 * e);       // a tira se afasta e levanta a partir do pique
-  pt.line.scale.x = Math.max(1e-4, SACHE_W * k);
+  const sd = S.userData.tearCfg?.side || 1;           // [RASGO2] lado do pique escolhido (espelha a dobradiça)
+  pt.pivot.rotation.set(0, -0.34 * e * sd, 0.16 * e * sd);   // a tira se afasta e levanta a partir do pique
+  pt.line.scale.x = sd * Math.max(1e-4, SACHE_W * k);
+}
+// [RASGO2] o rasgo pode começar em qualquer um dos 4 cantos das pontas do pacote (2 piques × 2 pontas):
+// a ponta escolhida vira a "tira" (o desenho gira 180° se for a ponta de trás) e o pique escolhido define
+// de que lado o rasgo corre. Assim o jogador rasga do jeito que estiver segurando.
+function setTearConfig(S, side, end) {
+  const vis = S.children[0], pt = vis?.userData.parts; if (!pt) return;
+  S.userData.tearCfg = { side, end };
+  vis.rotation.y = end > 0 ? 0 : Math.PI;
+  pt.pivot.position.x = -side * SACHE_W / 2; pt.strip.position.x = side * SACHE_W / 2;
+  pt.line.position.x = side * SACHE_W / 2;
+  setTearVisual(S, 0);
+}
+// cantos possíveis no referencial do pacote: (sx, ez) = lado e ponta
+const TAB_Z = tearZ + (SACHE_W / 2 - tearZ) / 2;
+function tabCandidates(S) {
+  const out = [];
+  for (const ez of [1, -1]) for (const sx of [1, -1])
+    out.push({ sx, ez, w: S.localToWorld(new THREE.Vector3(sx * SACHE_W * 0.32, SACHE_T / 2, ez * TAB_Z)) });
+  return out;
+}
+function nearestTab(S, p) {
+  let best = null, bd = 1e9;
+  for (const c of tabCandidates(S)) { const d = c.w.distanceTo(p); if (d < bd) { bd = d; best = c; } }
+  best.d = bd; return best;
 }
 // animações curtas do procedimento (rasgo, lenço saindo, campo abrindo)
 function addAnim(dur, step, done) { P.anims.push({ t: 0, dur, step, done }); }
@@ -3447,6 +3473,7 @@ function sfxTear(p) {
 function openSache(S, hand) {
   setTearVisual(S, 1); S.updateMatrixWorld(true);
   const pos = S.getWorldPosition(new THREE.Vector3()), q = S.getWorldQuaternion(new THREE.Quaternion());
+  if ((S.userData.tearCfg?.end || 1) < 0) q.multiply(new THREE.Quaternion().setFromAxisAngle(YAXIS, Math.PI));   // [RASGO2]
   const stripPiece = S.children[0].userData.parts.strip;
   const sm = stripPiece.matrixWorld.clone().multiply(new THREE.Matrix4().makeTranslation(0, -SACHE_T / 2, 0));
   const sPos = new THREE.Vector3(), sQ = new THREE.Quaternion(); sm.decompose(sPos, sQ, new THREE.Vector3());
@@ -3484,14 +3511,20 @@ function openSache(S, hand) {
 }
 // VR: uma mão segura o sachê, a outra pinça/fecha na borda e puxa para longe
 // [REVISÃO] aba do rasgo: esfera tolerante na tira do "Rasgue aqui" (não vale pinçar o corpo do pacote)
-function tabWorld(S) { return S.localToWorld(new THREE.Vector3(SACHE_W * 0.32, SACHE_T, tearZ + (SACHE_W / 2 - tearZ) / 2)); }
+function tabWorld(S) {                                // aba do rasgo atual (ou a padrão)
+  const c = S.userData.tearCfg || { side: 1, end: 1 }, sx = c.end > 0 ? c.side : -c.side;
+  return S.localToWorld(new THREE.Vector3(sx * SACHE_W * 0.32, SACHE_T / 2, c.end * TAB_Z));
+}
 function tearStart(i, p) {
   const o = 1 - i, S = held[o];
   if (!isSache(S) || typeof S.userData.heldBy !== 'number') return false;
-  if (tabWorld(S).distanceTo(p) > (isHand[i] ? 0.05 : 0.035)) return false;
+  const tb = nearestTab(S, p);                          // [RASGO2] qualquer canto das duas pontas
+  if (tb.d > (isHand[i] ? 0.05 : 0.04)) return false;
   if (!firmPinch(i)) { setHint('Pinça firme na aba: gatilho + polegar no A/X.', 2500); return false; }
+  setTearConfig(S, tb.ez > 0 ? tb.sx : -tb.sx, tb.ez);
   const hp0 = isHand[i] ? handWorld(i).p : rig.localToWorld(grips[i].position.clone());   // posição real do controle (mesma medida do puxão)
-  P.tear = { s: S, hand: i, other: o, d0: hp0.distanceTo(handWorld(o).p), lastK: -1, hapT: 0, lag: null };
+  const op0 = handWorld(o).p.clone();
+  P.tear = { s: S, hand: i, other: o, d0: hp0.distanceTo(op0), rel0: hp0.clone().sub(op0), lastK: -1, hapT: 0, lag: null };
   gloveFlash[i] = 1; fx('tension', tabWorld(S), [i], 0.1);
   return true;
 }
@@ -3517,7 +3550,12 @@ function updateTear() {
   if (held[t.other] !== t.s) { setTearVisual(t.s, 0); P.tear = null; return; }
   const hp = rig.localToWorld(grips[t.hand].position.clone()), op = handWorld(t.other).p;   // posição real do controle (sem o atraso visual)
   if (isHand[t.hand]) hp.copy(handWorld(t.hand).p);
-  const pull = hp.distanceTo(op) - t.d0, dir = op.clone().sub(hp).normalize(), tab = tabWorld(t.s);
+  // [RASGO2] vale puxar em qualquer sentido (afastar, para cima/baixo, torcer para o lado): conta o
+  // deslocamento relativo entre as mãos; só não conta empurrar uma mão contra a outra
+  const rel = hp.clone().sub(op), d = rel.clone().sub(t.rel0), n0 = t.rel0.clone().normalize();
+  const toward = d.dot(n0) < -0.85 * d.length();          // só empurrar quase reto contra a outra mão não conta
+  const pull = Math.max(hp.distanceTo(op) - t.d0, toward ? 0 : d.length() * 0.9);
+  const dir = d.lengthSq() > 1e-8 ? d.clone().normalize().negate() : op.clone().sub(hp).normalize(), tab = tabWorld(t.s);
   t.hapT -= 1 / 72;
   if (pull < TEAR_ELASTIC) {
     const e = Math.max(0, pull) / TEAR_ELASTIC;
@@ -4340,7 +4378,7 @@ function procPointerDown(hit, e) {
     else return true;
   }
   const sHit = hit && P.saches.find(S => isInside(hit.object, S));
-  if (sHit) { P.tearMouse = { s: sHit, x: e.clientX, y: e.clientY, done: false }; controls.enabled = false; return true; }
+  if (sHit) { setTearConfig(sHit, 1, 1); P.tearMouse = { s: sHit, x: e.clientX, y: e.clientY, done: false }; controls.enabled = false; return true; }
   if (!hit && curStep() === 'descartar' && P.padSheet) {   // clicar no campo aberto: dobra para descartar
     setNdc(e);
     if (raycaster.intersectObject(P.padSheet)[0]) { pickPadSheet('mouse'); return true; }
@@ -4710,8 +4748,11 @@ function blockingGrillItem() {
 function gSache() {                                  // aponta um AlcoolPrep fechado e mostra o puxão do rasgo
   if (P.swabVis) { gPoint(P.swabVis.m.getWorldPosition(new THREE.Vector3())); return; }   // [REVISÃO] lenço exposto: pince aqui
   const S = P.saches.find(o => heldBy(o)) || P.saches[0]; if (!S) return;
-  const notch = tabWorld(S), out = new THREE.Vector3(0, 0, 1).applyQuaternion(frameOf(S).q);   // [REVISÃO] aponta a aba e o sentido do puxão
   if (renderer.xr.isPresenting && !isHeldNum(S)) { gPointItem(S); return; }
+  let notch = tabWorld(S), ez = S.userData.tearCfg?.end || 1;
+  if (renderer.xr.isPresenting && isHeldNum(S) && !P.tear) {   // [RASGO2] aponta o canto mais perto da mão livre
+    const tb = nearestTab(S, handWorld(1 - S.userData.heldBy).p); notch = tb.w; ez = tb.ez; }
+  const out = new THREE.Vector3(0, 0, ez).applyQuaternion(frameOf(S).q);   // [REVISÃO] aponta a aba e o sentido do puxão
   gPoint(notch); gMove(notch.clone().addScaledVector(out, 0.01), out, 0.06);
 }
 function guideStep() {
@@ -4952,7 +4993,7 @@ function updateMenuStatus() {
 setInterval(updateMenuStatus, 500);
 if (innerWidth < 700) { ui.classList.add('min'); document.getElementById('toggle').textContent = '+'; }   // tela estreita: começa recolhido
 syncMenu();
-window.game = { syncMenu, setVoice, get voicePlaying(){return voicePlaying}, hasClip, drawTutPanel, ensureTutPanel, narrationCatalog, voiceKey, setLang, showCtrlGuide, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
+window.game = { setTearConfig, syncMenu, setVoice, get voicePlaying(){return voicePlaying}, hasClip, drawTutPanel, ensureTutPanel, narrationCatalog, voiceKey, setLang, showCtrlGuide, EXTRA_BTNS, get LANG(){return LANG}, lastSideIn, ctrlBtn, ctrlFirm, makeCloth, clothShape, recenterSeated, get rig(){return rig}, xrCam: renderer.xr.getCamera(), get seatedMode(){return seatedMode}, setTearVisual, sources, updateControllerHand, physHand, ctrlPinch, ctrlPalm, grabMode, isHand, release, pinchLocal, padTwoStart, get lidOpen(){return lidOpen}, handPress, pressMode, get MODE(){return MODE}, contamLine, get stainsN(){return stains.length}, get aeroN(){return aero.length}, dbgHit(p){ const d=p.clone().sub(camera.position).normalize(); raycaster.set(camera.position,d); const h=raycaster.intersectObjects(items,true)[0]; return h? itemOf(h.object)?.name+" @"+h.distance.toFixed(3)+" vs "+p.distanceTo(camera.position).toFixed(3) : "nada"; }, get dragging(){return dragging?.name||null}, STEPS, toggleStand, curStep, portWorld, luerWorld, sadTopWorld, grab, holdVialPose, adapterAlignment, held, grips, procGrab, P, setStroke, lockAdapter, CANNON, world, isTipped, pressReset, snapToPalm, items, scene, camera, table, GloveHand, drawControllerGlove, togglePower, get sashOffset() { return sashOffset; }, setSash: v => { sashTarget = v; }, tut }; // acesso para depuração no console
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
